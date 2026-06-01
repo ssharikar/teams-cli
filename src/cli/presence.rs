@@ -39,13 +39,9 @@ pub async fn handle(
     args: &PresenceArgs,
     tokens: &TokenSet,
     http: &HttpClient,
-    messaging_token: Option<&str>,
     format: OutputFormat,
 ) -> Result<()> {
-    let client = match messaging_token {
-        Some(mt) => PresenceClient::with_messaging_token(http, tokens, mt),
-        None => PresenceClient::new(http, tokens),
-    };
+    let client = PresenceClient::new(http, tokens);
 
     match &args.command {
         PresenceCommand::Get => {
@@ -61,7 +57,7 @@ pub async fn handle(
         }
         PresenceCommand::Offline => {
             let start = Instant::now();
-            client.clear_presence().await?;
+            client.set_presence("Offline").await?;
             let result = serde_json::json!({"availability": "Offline", "status": "set"});
             output::print_output(format, result, start.elapsed().as_millis() as u64);
         }
