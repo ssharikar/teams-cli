@@ -50,17 +50,19 @@ impl<'a> PresenceClient<'a> {
     }
 
     /// Clear the forced availability override, reverting presence to Offline.
-    /// The forceavailability endpoint only accepts active statuses — to go
-    /// offline, we DELETE the override instead of setting "Offline".
+    /// Sends a PUT with an empty JSON body to reset the override — the DELETE
+    /// endpoint rejects all available bearer tokens.
     pub async fn clear_presence(&self) -> Result<()> {
-        let bearer = self.tokens.chatsvcagg_bearer();
+        let bearer = self.tokens.skype_bearer();
 
         self.http
             .execute_with_retry(|| {
                 self.http
                     .client
-                    .delete(PRESENCE_URL)
+                    .put(PRESENCE_URL)
                     .header("Authorization", &bearer)
+                    .header("Content-Type", "application/json")
+                    .body("{}")
             })
             .await?;
 
