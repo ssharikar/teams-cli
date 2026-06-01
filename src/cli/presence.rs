@@ -39,9 +39,13 @@ pub async fn handle(
     args: &PresenceArgs,
     tokens: &TokenSet,
     http: &HttpClient,
+    messaging_token: Option<&str>,
     format: OutputFormat,
 ) -> Result<()> {
-    let client = PresenceClient::new(http, tokens);
+    let client = match messaging_token {
+        Some(mt) => PresenceClient::with_messaging_token(http, tokens, mt),
+        None => PresenceClient::new(http, tokens),
+    };
 
     match &args.command {
         PresenceCommand::Get => {
