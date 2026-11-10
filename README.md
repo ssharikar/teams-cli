@@ -65,11 +65,6 @@ session, or simply not having run the CLI in a long time) — when that
 happens, or for any profile that logged in before this existed, the CLI falls
 back to the interactive webview exactly as before.
 
-On macOS, the interactive webview itself also remembers its SSO session
-per `--profile` (so you usually aren't retyping a password even on that
-fallback) while keeping different profiles isolated from each other. On
-other platforms the webview session is not persisted between logins.
-
 ### Auto-login
 
 If tokens are missing or expired and can't be silently refreshed, the CLI
