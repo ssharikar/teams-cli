@@ -3,11 +3,13 @@ use std::io::Read;
 use std::time::Instant;
 
 use crate::api::blob::BlobClient;
+use crate::api::csa::CsaClient;
 use crate::api::messages::MessagesClient;
 use crate::api::HttpClient;
 use crate::auth::token::TokenSet;
-use crate::error::Result;
+use crate::error::{Result, TeamsError};
 use crate::html::strip_html;
+use crate::models::ConversationResponse;
 use crate::output::{self, OutputFormat};
 
 #[derive(Args)]
@@ -20,7 +22,8 @@ pub struct MessageArgs {
 pub enum MessageCommand {
     /// List messages in a conversation
     List {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Maximum number of messages to fetch
         #[arg(long, default_value = "50")]
@@ -28,7 +31,8 @@ pub enum MessageCommand {
     },
     /// Send a message to a conversation
     Send {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Message body text
         #[arg(long)]
@@ -45,14 +49,16 @@ pub enum MessageCommand {
     },
     /// Get a specific message
     Get {
-        /// Conversation ID
+        /// Conversation ID, or a friendly target: "#channel-name" or a chat
+        /// title / participant name
         conversation_id: String,
         /// Message ID
         message_id: String,
     },
     /// Edit a message you previously sent
     Edit {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Message ID to edit
         message_id: String,
@@ -68,14 +74,16 @@ pub enum MessageCommand {
     },
     /// Delete a message you previously sent
     Delete {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Message ID to delete
         message_id: String,
     },
     /// React to a message
     React {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Message ID to react to
         message_id: String,
@@ -85,7 +93,8 @@ pub enum MessageCommand {
     },
     /// Remove a reaction from a message
     Unreact {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Message ID to remove reaction from
         message_id: String,
@@ -110,14 +119,16 @@ pub async fn handle(
     format: OutputFormat,
 ) -> Result<()> {
     let msg_client = MessagesClient::new(ctx.http, ctx.messaging_token, ctx.chat_service_url);
+    let csa = CsaClient::new(ctx.http, ctx.tokens);
 
     match &args.command {
         MessageCommand::List {
             conversation_id,
             limit,
         } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let start = Instant::now();
-            let messages = msg_client.get_messages(conversation_id, *limit).await?;
+            let messages = msg_client.get_messages(&conversation_id, *limit).await?;
             let display: Vec<serde_json::Value> = messages
                 .iter()
                 .filter(|m| m.message_type == "RichText/Html" || m.message_type == "Text")
@@ -140,6 +151,8 @@ pub async fn handle(
             html,
             file,
         } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
+            let conversation_id = conversation_id.as_str();
             let content = if *stdin {
                 let mut buf = String::new();
                 std::io::stdin()
@@ -207,8 +220,9 @@ pub async fn handle(
             conversation_id,
             message_id,
         } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let start = Instant::now();
-            let messages = msg_client.get_messages(conversation_id, 200).await?;
+            let messages = msg_client.get_messages(&conversation_id, 200).await?;
             let message = messages
                 .iter()
                 .find(|m| m.id == *message_id)
@@ -224,6 +238,7 @@ pub async fn handle(
             stdin,
             html,
         } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let content = if *stdin {
                 let mut buf = String::new();
                 std::io::stdin()
@@ -249,7 +264,7 @@ pub async fn handle(
             let start = Instant::now();
             msg_client
                 .edit_message(
-                    conversation_id,
+                    &conversation_id,
                     message_id,
                     &final_content,
                     &display_name,
@@ -269,9 +284,10 @@ pub async fn handle(
             conversation_id,
             message_id,
         } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let start = Instant::now();
             msg_client
-                .delete_message(conversation_id, message_id)
+                .delete_message(&conversation_id, message_id)
                 .await?;
 
             let result = serde_json::json!({
@@ -287,9 +303,10 @@ pub async fn handle(
             reaction,
         } => {
             validate_reaction(reaction)?;
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let start = Instant::now();
             msg_client
-                .react(conversation_id, message_id, reaction)
+                .react(&conversation_id, message_id, reaction)
                 .await?;
             let result = serde_json::json!({
                 "message_id": message_id,
@@ -304,9 +321,10 @@ pub async fn handle(
             reaction,
         } => {
             validate_reaction(reaction)?;
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let start = Instant::now();
             msg_client
-                .unreact(conversation_id, message_id, reaction)
+                .unreact(&conversation_id, message_id, reaction)
                 .await?;
             let result = serde_json::json!({
                 "message_id": message_id,
@@ -317,6 +335,150 @@ pub async fn handle(
         }
     }
     Ok(())
+}
+
+/// Resolves a user-friendly target to the raw conversation ID the messaging
+/// API needs. Raw IDs (channel and chat thread IDs always contain
+/// "@thread.") pass straight through, so existing scripts pay no extra round
+/// trip. Otherwise `#name` looks up a channel by display name across all
+/// teams, and anything else looks up a chat by title or participant name —
+/// mirroring `teams chat list` / `teams channel list` so a user can target
+/// what they see there without first copying out a raw ID.
+async fn resolve_target(target: &str, csa: &CsaClient<'_>) -> Result<String> {
+    if target.contains("@thread.") {
+        return Ok(target.to_string());
+    }
+
+    let conversations = csa.get_conversations().await?;
+
+    if let Some(name) = target.strip_prefix('#') {
+        return resolve_channel(name, &conversations);
+    }
+
+    resolve_chat(target, &conversations)
+}
+
+fn resolve_channel(name: &str, conversations: &ConversationResponse) -> Result<String> {
+    let needle = name.to_ascii_lowercase();
+    let mut exact: Vec<(String, String, String)> = Vec::new();
+    let mut partial: Vec<(String, String, String)> = Vec::new();
+
+    for team in &conversations.teams {
+        let team_name = team
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let empty = Vec::new();
+        let channels = team
+            .get("channels")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        for channel in channels {
+            let id = channel.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if id.is_empty() {
+                continue;
+            }
+            let display = channel
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let lower = display.to_ascii_lowercase();
+            if lower == needle {
+                exact.push((team_name.to_string(), display.to_string(), id.to_string()));
+            } else if lower.contains(&needle) {
+                partial.push((team_name.to_string(), display.to_string(), id.to_string()));
+            }
+        }
+    }
+
+    let matches = if !exact.is_empty() { exact } else { partial };
+    match matches.len() {
+        0 => Err(TeamsError::NotFound(format!(
+            "channel '#{name}' (use `teams channel list <team-id>` to see channel names, or pass the raw channel ID)"
+        ))),
+        1 => Ok(matches[0].2.clone()),
+        _ => {
+            let options = matches
+                .iter()
+                .map(|(team, ch, _)| format!("{team}/#{ch}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(TeamsError::InvalidInput(format!(
+                "'#{name}' matches multiple channels: {options} — use a more specific name or the raw channel ID"
+            )))
+        }
+    }
+}
+
+fn resolve_chat(target: &str, conversations: &ConversationResponse) -> Result<String> {
+    let needle = target.to_ascii_lowercase();
+    let mut exact: Vec<(String, String)> = Vec::new();
+    let mut partial: Vec<(String, String)> = Vec::new();
+
+    for chat in &conversations.chats {
+        let id = chat.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+
+        let title = chat.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let title_lower = title.to_ascii_lowercase();
+        if !title.is_empty() && title_lower == needle {
+            exact.push((title.to_string(), id.to_string()));
+            continue;
+        }
+        if !title.is_empty() && title_lower.contains(&needle) {
+            partial.push((title.to_string(), id.to_string()));
+            continue;
+        }
+
+        // No title match — fall back to participant name/email, which is
+        // the only identifying label most 1:1 chats have.
+        let empty = Vec::new();
+        let members = chat
+            .get("members")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        for member in members {
+            let friendly = member
+                .get("friendlyName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if friendly.is_empty() {
+                continue;
+            }
+            let friendly_lower = friendly.to_ascii_lowercase();
+            if friendly_lower == needle {
+                exact.push((friendly.to_string(), id.to_string()));
+            } else if friendly_lower.contains(&needle) {
+                partial.push((friendly.to_string(), id.to_string()));
+            }
+        }
+    }
+
+    let matches = if !exact.is_empty() { exact } else { partial };
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<_> = matches
+        .into_iter()
+        .filter(|(_, id)| seen.insert(id.clone()))
+        .collect();
+
+    match unique.len() {
+        0 => Err(TeamsError::NotFound(format!(
+            "chat/user matching '{target}' (use `teams chat list` to see chat titles, or pass the raw chat ID)"
+        ))),
+        1 => Ok(unique[0].1.clone()),
+        _ => {
+            let options = unique
+                .iter()
+                .map(|(label, _)| label.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(TeamsError::InvalidInput(format!(
+                "'{target}' matches multiple chats: {options} — use a more specific name or the raw chat ID"
+            )))
+        }
+    }
 }
 
 const VALID_REACTIONS: &[&str] = &["like", "heart", "laugh", "surprised", "sad", "angry"];
@@ -500,5 +662,104 @@ mod tests {
         assert_eq!(html_unescape("&lt;tag&gt;"), "<tag>");
         assert_eq!(html_unescape("&quot;hi&quot;"), "\"hi\"");
         assert_eq!(html_unescape("it&#39;s"), "it's");
+    }
+
+    fn sample_conversations() -> ConversationResponse {
+        serde_json::from_value(serde_json::json!({
+            "teams": [
+                {
+                    "id": "team-1",
+                    "displayName": "Engineering",
+                    "channels": [
+                        {"id": "19:general@thread.tacv2", "displayName": "General"},
+                        {"id": "19:releases@thread.tacv2", "displayName": "Releases"}
+                    ]
+                },
+                {
+                    "id": "team-2",
+                    "displayName": "Design",
+                    "channels": [
+                        {"id": "19:design-general@thread.tacv2", "displayName": "General"}
+                    ]
+                }
+            ],
+            "chats": [
+                {
+                    "id": "19:chat-alice@unq.gbl.spaces",
+                    "title": "",
+                    "members": [
+                        {"mri": "8:orgid:me", "friendlyName": "Me"},
+                        {"mri": "8:orgid:alice", "friendlyName": "Alice Smith"}
+                    ]
+                },
+                {
+                    "id": "19:chat-project@thread.v2",
+                    "title": "Project Rollout",
+                    "members": []
+                }
+            ]
+        }))
+        .unwrap()
+    }
+
+    #[test]
+    fn resolve_channel_exact_match() {
+        let conversations = sample_conversations();
+        let id = resolve_channel("Releases", &conversations).unwrap();
+        assert_eq!(id, "19:releases@thread.tacv2");
+    }
+
+    #[test]
+    fn resolve_channel_case_insensitive() {
+        let conversations = sample_conversations();
+        let id = resolve_channel("releases", &conversations).unwrap();
+        assert_eq!(id, "19:releases@thread.tacv2");
+    }
+
+    #[test]
+    fn resolve_channel_ambiguous_exact_match_across_teams() {
+        let conversations = sample_conversations();
+        let err = resolve_channel("General", &conversations).unwrap_err();
+        assert!(err.to_string().contains("multiple channels"));
+    }
+
+    #[test]
+    fn resolve_channel_not_found() {
+        let conversations = sample_conversations();
+        assert!(resolve_channel("nonexistent", &conversations).is_err());
+    }
+
+    #[test]
+    fn resolve_channel_partial_match() {
+        let conversations = sample_conversations();
+        let id = resolve_channel("release", &conversations).unwrap();
+        assert_eq!(id, "19:releases@thread.tacv2");
+    }
+
+    #[test]
+    fn resolve_chat_by_title() {
+        let conversations = sample_conversations();
+        let id = resolve_chat("Project Rollout", &conversations).unwrap();
+        assert_eq!(id, "19:chat-project@thread.v2");
+    }
+
+    #[test]
+    fn resolve_chat_by_participant_name() {
+        let conversations = sample_conversations();
+        let id = resolve_chat("Alice Smith", &conversations).unwrap();
+        assert_eq!(id, "19:chat-alice@unq.gbl.spaces");
+    }
+
+    #[test]
+    fn resolve_chat_by_partial_participant_name() {
+        let conversations = sample_conversations();
+        let id = resolve_chat("alice", &conversations).unwrap();
+        assert_eq!(id, "19:chat-alice@unq.gbl.spaces");
+    }
+
+    #[test]
+    fn resolve_chat_not_found() {
+        let conversations = sample_conversations();
+        assert!(resolve_chat("nobody", &conversations).is_err());
     }
 }

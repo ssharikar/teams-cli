@@ -45,6 +45,17 @@ pub enum MailCommand {
         /// Message ID
         message_id: String,
     },
+    /// Download a message's file attachments to disk
+    Download {
+        /// Message ID
+        message_id: String,
+        /// Directory to save attachments into (default: current directory)
+        #[arg(long, short = 'o')]
+        out: Option<String>,
+        /// Also download inline attachments (e.g. images embedded in the body)
+        #[arg(long)]
+        all: bool,
+    },
     /// Reply to a message, keeping the subject/thread (sends immediately)
     Reply {
         /// Message ID being replied to
@@ -260,6 +271,72 @@ pub async fn handle(
             output::print_output(format, result, start.elapsed().as_millis() as u64);
         }
 
+        MailCommand::Download {
+            message_id,
+            out,
+            all,
+        } => {
+            let start = Instant::now();
+            let attachments = client.list_attachments(message_id).await?;
+
+            let out_dir = out.as_deref().unwrap_or(".");
+            std::fs::create_dir_all(out_dir).map_err(|e| {
+                TeamsError::InvalidInput(format!("cannot create directory {out_dir:?}: {e}"))
+            })?;
+
+            let mut saved = Vec::new();
+            for att in &attachments {
+                if att.is_inline && !*all {
+                    continue;
+                }
+
+                let content_bytes = if let Some(bytes) = &att.content_bytes {
+                    bytes.clone()
+                } else {
+                    client
+                        .get_attachment(message_id, &att.id)
+                        .await?
+                        .content_bytes
+                        .ok_or_else(|| {
+                            TeamsError::ApiError {
+                                status: 0,
+                                message: format!(
+                                    "attachment {:?} has no downloadable content (not a file attachment?)",
+                                    att.name
+                                ),
+                            }
+                        })?
+                };
+
+                use base64::Engine;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&content_bytes)
+                    .map_err(|e| TeamsError::ApiError {
+                        status: 0,
+                        message: format!("attachment {:?}: invalid base64 content: {e}", att.name),
+                    })?;
+
+                let safe_name = sanitize_filename(&att.name);
+                let path = std::path::Path::new(out_dir).join(&safe_name);
+                std::fs::write(&path, &decoded)
+                    .map_err(|e| TeamsError::InvalidInput(format!("cannot write {path:?}: {e}")))?;
+
+                saved.push(serde_json::json!({
+                    "name": att.name,
+                    "path": path.to_string_lossy(),
+                    "size": decoded.len(),
+                }));
+            }
+
+            let result = serde_json::json!({
+                "status": "downloaded",
+                "id": message_id,
+                "count": saved.len(),
+                "files": saved,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
         MailCommand::Reply {
             message_id,
             body,
@@ -459,6 +536,22 @@ fn attachments_from(paths: &[String]) -> Result<Vec<FileAttachment>> {
         .collect()
 }
 
+/// Strips path separators and leading dots from an attachment name before
+/// using it as a filename, so a malicious/odd `Name` field (e.g.
+/// "../../etc/passwd") can't escape the chosen output directory.
+fn sanitize_filename(name: &str) -> String {
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim_start_matches('.');
+    if base.is_empty() {
+        "attachment".to_string()
+    } else {
+        base.to_string()
+    }
+}
+
 fn resolve_body(body: Option<&str>, stdin: bool, file: Option<&str>) -> Result<String> {
     if stdin {
         let mut buf = String::new();
@@ -561,5 +654,34 @@ mod tests {
     #[test]
     fn resolve_body_missing_all() {
         assert!(resolve_body(None, false, None).is_err());
+    }
+
+    #[test]
+    fn sanitize_filename_plain_name() {
+        assert_eq!(sanitize_filename("report.pdf"), "report.pdf");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_directory_traversal() {
+        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_windows_path() {
+        assert_eq!(
+            sanitize_filename("C:\\Users\\bob\\report.pdf"),
+            "report.pdf"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_strips_leading_dot() {
+        assert_eq!(sanitize_filename(".hidden"), "hidden");
+    }
+
+    #[test]
+    fn sanitize_filename_empty_falls_back() {
+        assert_eq!(sanitize_filename(""), "attachment");
+        assert_eq!(sanitize_filename("."), "attachment");
     }
 }

@@ -74,6 +74,33 @@ pub struct MailFolderListResponse {
     pub value: Vec<MailFolder>,
 }
 
+// ── Attachments ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailAttachment {
+    #[serde(rename = "Id", default)]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "ContentType", default)]
+    pub content_type: String,
+    #[serde(rename = "Size", default)]
+    pub size: i64,
+    #[serde(rename = "IsInline", default)]
+    pub is_inline: bool,
+    /// Present on the list/get response for file attachments (base64). Not
+    /// present for other attachment kinds (e.g. ItemAttachment), which this
+    /// client doesn't download.
+    #[serde(rename = "ContentBytes", default)]
+    pub content_bytes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentListResponse {
+    #[serde(rename = "value", default)]
+    pub value: Vec<MailAttachment>,
+}
+
 // ── Send mail ─────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -479,5 +506,47 @@ mod tests {
         assert!(msg.from.is_none());
         assert!(msg.to_recipients.is_empty());
         assert!(!msg.is_read);
+    }
+
+    #[test]
+    fn deserialize_attachment_list_response() {
+        let json = r##"{
+            "value": [
+                {
+                    "@odata.type": "#Microsoft.OutlookServices.FileAttachment",
+                    "Id": "att-1",
+                    "Name": "report.pdf",
+                    "ContentType": "application/pdf",
+                    "Size": 12345,
+                    "IsInline": false,
+                    "ContentBytes": "ZmFrZQ=="
+                },
+                {
+                    "@odata.type": "#Microsoft.OutlookServices.FileAttachment",
+                    "Id": "att-2",
+                    "Name": "logo.png",
+                    "ContentType": "image/png",
+                    "Size": 500,
+                    "IsInline": true,
+                    "ContentBytes": "ZmFrZTI="
+                }
+            ]
+        }"##;
+        let resp: AttachmentListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.value.len(), 2);
+        assert_eq!(resp.value[0].name, "report.pdf");
+        assert!(!resp.value[0].is_inline);
+        assert_eq!(resp.value[0].content_bytes.as_deref(), Some("ZmFrZQ=="));
+        assert!(resp.value[1].is_inline);
+    }
+
+    #[test]
+    fn deserialize_attachment_missing_content_bytes() {
+        let json = r#"{"Id": "att-3", "Name": "note.txt"}"#;
+        let att: MailAttachment = serde_json::from_str(json).unwrap();
+        assert_eq!(att.name, "note.txt");
+        assert!(att.content_bytes.is_none());
+        assert!(!att.is_inline);
+        assert_eq!(att.size, 0);
     }
 }

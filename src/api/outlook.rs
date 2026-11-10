@@ -1,8 +1,8 @@
 use crate::error::{Result, TeamsError};
 use crate::models::outlook::{
-    CreateEventRequest, DraftMessage, EventListResponse, MailFolderListResponse,
-    MessageListResponse, OutlookEvent, OutlookMessage, Recipient, SendMailRequest,
-    UpdateEventRequest,
+    AttachmentListResponse, CreateEventRequest, DraftMessage, EventListResponse, MailAttachment,
+    MailFolderListResponse, MessageListResponse, OutlookEvent, OutlookMessage, Recipient,
+    SendMailRequest, UpdateEventRequest,
 };
 
 use super::HttpClient;
@@ -301,6 +301,54 @@ impl<'a> OutlookClient<'a> {
             .await?;
 
         Ok(())
+    }
+
+    /// Lists a message's attachments via GET /me/messages/{id}/attachments.
+    /// The v2.0 API includes `ContentBytes` for file attachments directly in
+    /// this list response, so a download rarely needs the per-attachment
+    /// fetch below — but callers should still check `content_bytes` and
+    /// fall back to `get_attachment` if it's missing.
+    pub async fn list_attachments(&self, message_id: &str) -> Result<Vec<MailAttachment>> {
+        let encoded_id = urlencoding::encode(message_id);
+        let url = format!("{OUTLOOK_API_BASE}/messages/{encoded_id}/attachments");
+
+        let bearer = self.bearer.clone();
+        let resp = self
+            .http
+            .execute_with_retry(|| self.http.client.get(&url).header("Authorization", &bearer))
+            .await?;
+
+        let list: AttachmentListResponse = resp.json().await.map_err(|e| TeamsError::ApiError {
+            status: 0,
+            message: format!("failed to parse attachment list: {e}"),
+        })?;
+
+        Ok(list.value)
+    }
+
+    /// Fetches a single attachment by id via GET
+    /// /me/messages/{id}/attachments/{attachment_id} — used when the list
+    /// response didn't include `ContentBytes`.
+    pub async fn get_attachment(
+        &self,
+        message_id: &str,
+        attachment_id: &str,
+    ) -> Result<MailAttachment> {
+        let encoded_msg_id = urlencoding::encode(message_id);
+        let encoded_att_id = urlencoding::encode(attachment_id);
+        let url =
+            format!("{OUTLOOK_API_BASE}/messages/{encoded_msg_id}/attachments/{encoded_att_id}");
+
+        let bearer = self.bearer.clone();
+        let resp = self
+            .http
+            .execute_with_retry(|| self.http.client.get(&url).header("Authorization", &bearer))
+            .await?;
+
+        resp.json().await.map_err(|e| TeamsError::ApiError {
+            status: 0,
+            message: format!("failed to parse attachment: {e}"),
+        })
     }
 
     // ── Calendar ──────────────────────────────────────────────────

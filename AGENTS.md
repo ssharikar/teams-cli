@@ -25,14 +25,17 @@ src/
   config.rs         -- TOML config at ~/.config/teams-cli/config.toml. Sentinel-based defaults.
   cli/              -- clap command definitions and handlers
     mod.rs          -- Cli struct, Commands enum, global flags (--no-auto-login, --no-color, etc.)
-    auth.rs         -- login (webview), status, logout, token
+    auth.rs         -- login (webview), status, list, logout, token
     user.rs         -- me, get, search
     team.rs         -- list, get
     channel.rs      -- list, get, pinned
-    chat.rs         -- list (--all for hidden), get
-    message.rs      -- list, send (--body or --stdin), get, edit, delete, react, unreact
-    mail.rs         -- list, read, send, draft, send-draft, delete, search (Outlook email)
-    calendar.rs     -- list, get, create (Outlook calendar)
+    chat.rs         -- list (--all for hidden), get, create
+    message.rs      -- list, send (--body or --stdin), get, edit, delete, react, unreact;
+                       conversation_id also accepts "#channel-name" or a chat
+                       title/participant name, resolved via CSA conversations
+    mail.rs         -- list, read, send, draft, send-draft, delete, download,
+                       reply, forward, search (Outlook email)
+    calendar.rs     -- list, get, create, update, cancel, respond (Outlook calendar)
     tenant.rs       -- list, domains
     config_cmd.rs   -- init, show, set, path
   auth/

@@ -89,6 +89,23 @@ teams message edit <conversation-id> <message-id> --body "corrected text"
 teams message delete <conversation-id> <message-id>
 ```
 
+Every `message` subcommand also accepts a friendly target instead of a raw
+conversation ID, resolved against your teams/channels and chats (same data
+as `teams channel list` / `teams chat list`):
+
+```sh
+# "#name" looks up a channel by display name across all your teams
+teams message send "#general" --body "Deploying now"
+
+# Anything else looks up a chat by title, or a 1:1 chat by participant name
+teams message send "Project Rollout" --body "Status update"
+teams message send "Alice Smith" --body "Hey, got a sec?"
+```
+
+If a name matches more than one channel or chat, the command errors out
+listing the ambiguous matches instead of guessing — use a more specific
+name or fall back to the raw ID from `channel list`/`chat list`.
+
 ### Users
 
 ```sh
@@ -125,6 +142,11 @@ teams mail send-draft <message-id>
 
 # Permanently delete a message (e.g. an unwanted draft)
 teams mail delete <message-id>
+
+# Download a message's file attachments (skips inline/embedded images by
+# default; --all includes those too)
+teams mail download <message-id> --out ./downloads
+teams mail download <message-id> --all
 
 # Reply (keeps subject/thread) or reply-all; forward to new recipients.
 # All three send immediately, same as `send`.
