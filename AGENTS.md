@@ -44,7 +44,10 @@ src/
     token.rs        -- TokenSet (incl. refresh_token), TokenInfo, JWT decode, constants
     webview.rs      -- tao/wry webview for 4-token OAuth2 hybrid flow (token+code on the Skype
                        leg, so a refresh token is exchanged via auth::refresh once login
-                       completes); returns Result<TokenSet>
+                       completes); returns Result<TokenSet>. On macOS, uses a persistent
+                       per-profile WKWebsiteDataStore (not incognito) so the SSO session
+                       survives across logins for the same profile; other platforms stay
+                       incognito (no persistent data-store API in wry for those backends)
     refresh.rs      -- Blocking calls to the AAD v1.0 token endpoint: one-time code->refresh_token
                        exchange, and grant_type=refresh_token redemption per resource (the same
                        refresh token works across Skype/ChatSvcAgg/Outlook/teams id_token)
