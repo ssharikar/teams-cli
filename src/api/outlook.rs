@@ -1,7 +1,8 @@
 use crate::error::{Result, TeamsError};
 use crate::models::outlook::{
     CreateEventRequest, DraftMessage, EventListResponse, MailFolderListResponse,
-    MessageListResponse, OutlookEvent, OutlookMessage, SendMailRequest,
+    MessageListResponse, OutlookEvent, OutlookMessage, Recipient, SendMailRequest,
+    UpdateEventRequest,
 };
 
 use super::HttpClient;
@@ -248,6 +249,60 @@ impl<'a> OutlookClient<'a> {
         Ok(list.value)
     }
 
+    /// Replies to a message via POST /me/messages/{id}/reply (or replyall),
+    /// which sends immediately — Outlook builds the quoted-original body and
+    /// keeps the thread/subject, prepending `comment` as the new text.
+    pub async fn reply_to_message(
+        &self,
+        message_id: &str,
+        comment: &str,
+        reply_all: bool,
+    ) -> Result<()> {
+        let encoded_id = urlencoding::encode(message_id);
+        let action = if reply_all { "replyall" } else { "reply" };
+        let url = format!("{OUTLOOK_API_BASE}/messages/{encoded_id}/{action}");
+
+        let bearer = self.bearer.clone();
+        let body = serde_json::json!({ "Comment": comment });
+        self.http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .post(&url)
+                    .header("Authorization", &bearer)
+                    .json(&body)
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Forwards a message via POST /me/messages/{id}/forward, which sends
+    /// immediately to the given recipients with `comment` prepended.
+    pub async fn forward_message(
+        &self,
+        message_id: &str,
+        comment: &str,
+        to: Vec<Recipient>,
+    ) -> Result<()> {
+        let encoded_id = urlencoding::encode(message_id);
+        let url = format!("{OUTLOOK_API_BASE}/messages/{encoded_id}/forward");
+
+        let bearer = self.bearer.clone();
+        let body = serde_json::json!({ "Comment": comment, "ToRecipients": to });
+        self.http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .post(&url)
+                    .header("Authorization", &bearer)
+                    .json(&body)
+            })
+            .await?;
+
+        Ok(())
+    }
+
     // ── Calendar ──────────────────────────────────────────────────
 
     pub async fn list_events(&self, start: &str, end: &str, top: u32) -> Result<Vec<OutlookEvent>> {
@@ -321,6 +376,92 @@ impl<'a> OutlookClient<'a> {
             status: 0,
             message: format!("failed to parse created event: {e}"),
         })
+    }
+
+    /// Partially updates an event via PATCH /me/events/{id} — only fields
+    /// set on `request` are changed.
+    pub async fn update_event(
+        &self,
+        event_id: &str,
+        request: &UpdateEventRequest,
+    ) -> Result<OutlookEvent> {
+        let encoded_id = urlencoding::encode(event_id);
+        let url = format!("{OUTLOOK_API_BASE}/events/{encoded_id}");
+
+        let bearer = self.bearer.clone();
+        let resp = self
+            .http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .patch(&url)
+                    .header("Authorization", &bearer)
+                    .header("Prefer", "outlook.timezone=\"UTC\"")
+                    .json(request)
+            })
+            .await?;
+
+        resp.json().await.map_err(|e| TeamsError::ApiError {
+            status: 0,
+            message: format!("failed to parse updated event: {e}"),
+        })
+    }
+
+    /// Cancels an event you organize via POST /me/events/{id}/cancel, which
+    /// notifies attendees and removes it from their calendars.
+    pub async fn cancel_event(&self, event_id: &str, comment: Option<&str>) -> Result<()> {
+        let encoded_id = urlencoding::encode(event_id);
+        let url = format!("{OUTLOOK_API_BASE}/events/{encoded_id}/cancel");
+
+        let bearer = self.bearer.clone();
+        let body = serde_json::json!({ "Comment": comment.unwrap_or("") });
+        self.http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .post(&url)
+                    .header("Authorization", &bearer)
+                    .json(&body)
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Responds to an invite you're attending, via POST
+    /// /me/events/{id}/accept, /decline, or /tentativelyaccept.
+    pub async fn respond_to_event(
+        &self,
+        event_id: &str,
+        response: &str,
+        comment: Option<&str>,
+    ) -> Result<()> {
+        let action = match response {
+            "accept" => "accept",
+            "decline" => "decline",
+            "tentative" => "tentativelyaccept",
+            other => {
+                return Err(TeamsError::InvalidInput(format!(
+                    "unknown response {other:?} (use accept, decline, or tentative)"
+                )))
+            }
+        };
+        let encoded_id = urlencoding::encode(event_id);
+        let url = format!("{OUTLOOK_API_BASE}/events/{encoded_id}/{action}");
+
+        let bearer = self.bearer.clone();
+        let body = serde_json::json!({ "Comment": comment.unwrap_or("") });
+        self.http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .post(&url)
+                    .header("Authorization", &bearer)
+                    .json(&body)
+            })
+            .await?;
+
+        Ok(())
     }
 }
 

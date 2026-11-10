@@ -45,6 +45,40 @@ pub enum MailCommand {
         /// Message ID
         message_id: String,
     },
+    /// Reply to a message, keeping the subject/thread (sends immediately)
+    Reply {
+        /// Message ID being replied to
+        message_id: String,
+        /// Reply body text
+        #[arg(long)]
+        body: Option<String>,
+        /// Read reply body from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Read reply body from file
+        #[arg(long)]
+        file: Option<String>,
+        /// Reply to everyone on the message (To + Cc), not just the sender
+        #[arg(long)]
+        all: bool,
+    },
+    /// Forward a message to new recipients (sends immediately)
+    Forward {
+        /// Message ID being forwarded
+        message_id: String,
+        /// Recipient email addresses (repeatable, or comma-separated)
+        #[arg(long, required = true, value_delimiter = ',')]
+        to: Vec<String>,
+        /// Comment to add above the forwarded message
+        #[arg(long)]
+        body: Option<String>,
+        /// Read comment from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Read comment from file
+        #[arg(long)]
+        file: Option<String>,
+    },
     /// Send an existing draft (e.g. one created by `mail draft`)
     SendDraft {
         /// Draft message ID
@@ -222,6 +256,47 @@ pub async fn handle(
             let result = serde_json::json!({
                 "status": "deleted",
                 "id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::Reply {
+            message_id,
+            body,
+            stdin,
+            file,
+            all,
+        } => {
+            let comment = resolve_body(body.as_deref(), *stdin, file.as_deref())?;
+
+            let start = Instant::now();
+            client.reply_to_message(message_id, &comment, *all).await?;
+
+            let result = serde_json::json!({
+                "status": if *all { "replied-all" } else { "replied" },
+                "id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::Forward {
+            message_id,
+            to,
+            body,
+            stdin,
+            file,
+        } => {
+            let comment = resolve_body(body.as_deref(), *stdin, file.as_deref())?;
+
+            let start = Instant::now();
+            client
+                .forward_message(message_id, &comment, recipients_from(to))
+                .await?;
+
+            let result = serde_json::json!({
+                "status": "forwarded",
+                "id": message_id,
+                "to": to,
             });
             output::print_output(format, result, start.elapsed().as_millis() as u64);
         }

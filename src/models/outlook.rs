@@ -225,6 +225,25 @@ pub struct CreateEventRequest {
     pub is_online_meeting: Option<bool>,
 }
 
+// ── Update event ──────────────────────────────────────────────────
+
+/// Body for PATCH /me/events/{id}. Every field is optional so only what the
+/// caller actually provided gets sent — Graph/Outlook only touches the
+/// fields present in a PATCH body, leaving everything else as-is.
+#[derive(Debug, Default, Serialize)]
+pub struct UpdateEventRequest {
+    #[serde(rename = "Subject", skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(rename = "Start", skip_serializing_if = "Option::is_none")]
+    pub start: Option<DateTimeTimeZone>,
+    #[serde(rename = "End", skip_serializing_if = "Option::is_none")]
+    pub end: Option<DateTimeTimeZone>,
+    #[serde(rename = "Location", skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    #[serde(rename = "Body", skip_serializing_if = "Option::is_none")]
+    pub body: Option<ItemBody>,
+}
+
 // ── Helpers ───────────────────────────────────────────────────────
 
 impl Recipient {
@@ -417,6 +436,20 @@ mod tests {
         assert_eq!(json["Subject"], "Meeting");
         assert_eq!(json["Location"]["DisplayName"], "Room 1");
         assert_eq!(json["IsOnlineMeeting"], true);
+        assert!(json.get("Body").is_none());
+    }
+
+    #[test]
+    fn serialize_update_event_request_only_set_fields() {
+        let req = UpdateEventRequest {
+            subject: Some("New subject".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["Subject"], "New subject");
+        assert!(json.get("Start").is_none());
+        assert!(json.get("End").is_none());
+        assert!(json.get("Location").is_none());
         assert!(json.get("Body").is_none());
     }
 

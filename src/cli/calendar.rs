@@ -8,6 +8,7 @@ use crate::error::{Result, TeamsError};
 use crate::html::strip_html;
 use crate::models::outlook::{
     Attendee, CreateEventRequest, DateTimeTimeZone, EmailAddress, ItemBody, Location,
+    UpdateEventRequest,
 };
 use crate::output::{self, OutputFormat};
 
@@ -62,6 +63,48 @@ pub enum CalendarCommand {
         /// Event body/description
         #[arg(long)]
         body: Option<String>,
+    },
+    /// Update fields on an existing event (only given flags are changed)
+    Update {
+        /// Event ID
+        event_id: String,
+        /// New subject/title
+        #[arg(long)]
+        subject: Option<String>,
+        /// New start date/time (ISO 8601)
+        #[arg(long)]
+        start: Option<String>,
+        /// New end date/time (ISO 8601)
+        #[arg(long)]
+        end: Option<String>,
+        /// Time zone for --start/--end (default: UTC)
+        #[arg(long, default_value = "UTC")]
+        timezone: String,
+        /// New location
+        #[arg(long)]
+        location: Option<String>,
+        /// New body/description
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// Cancel an event you organize, notifying attendees
+    Cancel {
+        /// Event ID
+        event_id: String,
+        /// Optional cancellation message to attendees
+        #[arg(long)]
+        comment: Option<String>,
+    },
+    /// Respond to an event you're invited to
+    Respond {
+        /// Event ID
+        event_id: String,
+        /// Response: accept, decline, or tentative
+        #[arg(long, required = true)]
+        response: String,
+        /// Optional message to the organizer
+        #[arg(long)]
+        comment: Option<String>,
     },
 }
 
@@ -223,6 +266,94 @@ pub async fn handle(
             });
 
             output::print_output(format, display, start.elapsed().as_millis() as u64);
+        }
+
+        CalendarCommand::Update {
+            event_id,
+            subject,
+            start: start_str,
+            end: end_str,
+            timezone,
+            location,
+            body,
+        } => {
+            if subject.is_none()
+                && start_str.is_none()
+                && end_str.is_none()
+                && location.is_none()
+                && body.is_none()
+            {
+                return Err(TeamsError::InvalidInput(
+                    "provide at least one of --subject, --start, --end, --location, --body".into(),
+                ));
+            }
+
+            let request = UpdateEventRequest {
+                subject: subject.clone(),
+                start: match start_str {
+                    Some(s) => Some(DateTimeTimeZone {
+                        date_time: parse_datetime(s)?,
+                        time_zone: timezone.clone(),
+                    }),
+                    None => None,
+                },
+                end: match end_str {
+                    Some(s) => Some(DateTimeTimeZone {
+                        date_time: parse_datetime(s)?,
+                        time_zone: timezone.clone(),
+                    }),
+                    None => None,
+                },
+                location: location.as_ref().map(|l| Location {
+                    display_name: l.clone(),
+                }),
+                body: body.as_ref().map(|b| ItemBody {
+                    content_type: "Text".to_string(),
+                    content: b.clone(),
+                }),
+            };
+
+            let start = Instant::now();
+            let event = client.update_event(event_id, &request).await?;
+
+            let display = serde_json::json!({
+                "id": event.id,
+                "subject": event.subject,
+                "start": event.start.date_time,
+                "end": event.end.date_time,
+                "location": event.location.as_ref().map(|l| &l.display_name),
+            });
+
+            output::print_output(format, display, start.elapsed().as_millis() as u64);
+        }
+
+        CalendarCommand::Cancel { event_id, comment } => {
+            let start = Instant::now();
+            client.cancel_event(event_id, comment.as_deref()).await?;
+
+            let result = serde_json::json!({
+                "status": "cancelled",
+                "id": event_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        CalendarCommand::Respond {
+            event_id,
+            response,
+            comment,
+        } => {
+            let start = Instant::now();
+            client
+                .respond_to_event(event_id, response, comment.as_deref())
+                .await?;
+
+            let result = serde_json::json!({
+                "status": "responded",
+                "response": response,
+                "id": event_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
         }
     }
 
