@@ -91,6 +91,7 @@ fn build_auth_url(
     response_type: &str,
     resource: Option<&str>,
     client_id: &str,
+    prompt: Option<&str>,
 ) -> (String, String) {
     let state = uuid::Uuid::new_v4().to_string();
     let nonce = uuid::Uuid::new_v4().to_string();
@@ -110,6 +111,17 @@ fn build_auth_url(
 
     if let Some(res) = resource {
         url.push_str(&format!("&resource={res}"));
+    }
+
+    // Only set on the very first navigation of a login flow. Without it,
+    // Microsoft silently reauthenticates as whatever account still has an
+    // active SSO session (e.g. from a previous `auth login` under a
+    // different --profile), instead of letting the person pick — which is
+    // how `auth login --profile cms` ended up signed in as the Samtek
+    // account. The 3 follow-up token requests in the same flow intentionally
+    // omit this so they stay silent and reuse the account just chosen here.
+    if let Some(p) = prompt {
+        url.push_str(&format!("&prompt={p}"));
     }
 
     (url, state)
@@ -169,8 +181,13 @@ fn is_allowed_domain(url: &str) -> bool {
 /// All tokens use implicit grant via the Teams app ID.
 /// Must be called from the main thread. Returns the token set on success.
 pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Result<TokenSet> {
-    let (initial_url, initial_state) =
-        build_auth_url(initial_tenant, "id_token", None, TEAMS_APP_ID);
+    let (initial_url, initial_state) = build_auth_url(
+        initial_tenant,
+        "id_token",
+        None,
+        TEAMS_APP_ID,
+        Some("select_account"),
+    );
 
     let state = Arc::new(Mutex::new(AuthState {
         phase: AuthPhase::Teams,
@@ -205,6 +222,11 @@ pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Resul
 
     let webview = WebViewBuilder::new()
         .with_url(&initial_url)
+        // Belt-and-suspenders alongside prompt=select_account above: an
+        // ephemeral, non-persistent session for this login window means no
+        // SSO cookie from a previous `auth login` (possibly a different
+        // --profile/account) can be reused, by construction.
+        .with_incognito(true)
         .with_navigation_handler(move |url: String| {
             if !url.starts_with("https://teams.microsoft.com/go") {
                 if !is_allowed_domain(&url) {
@@ -258,6 +280,7 @@ pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Resul
                             "token",
                             Some(SKYPE_RESOURCE),
                             TEAMS_APP_ID,
+                            None,
                         );
                         auth.expected_state = Some(next_state);
                         let _ = proxy_for_nav.send_event(format!("navigate:{next_url}"));
@@ -271,6 +294,7 @@ pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Resul
                         "token",
                         Some(CHATSVCAGG_RESOURCE),
                         TEAMS_APP_ID,
+                        None,
                     );
                     auth.expected_state = Some(next_state);
                     let _ = proxy_for_nav.send_event(format!("navigate:{next_url}"));
@@ -283,6 +307,7 @@ pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Resul
                         "token",
                         Some(OUTLOOK_RESOURCE),
                         TEAMS_APP_ID,
+                        None,
                     );
                     auth.expected_state = Some(next_state);
                     let _ = proxy_for_nav.send_event(format!("navigate:{next_url}"));
