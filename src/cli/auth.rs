@@ -33,6 +33,8 @@ pub enum AuthCommand {
         #[arg(default_value = "skype")]
         token_type: String,
     },
+    /// List all profiles with stored credentials
+    List,
 }
 
 pub async fn handle(args: &AuthArgs, profile: &str, format: OutputFormat) -> Result<()> {
@@ -122,6 +124,33 @@ pub async fn handle(args: &AuthArgs, profile: &str, format: OutputFormat) -> Res
             };
             eprintln!("warning: raw authentication token written to stdout");
             println!("{token}");
+            Ok(())
+        }
+
+        AuthCommand::List => {
+            let profiles = auth::keyring::list_profiles()?;
+
+            let display: Vec<serde_json::Value> = profiles
+                .iter()
+                .map(|p| match auth::resolve_tokens(p) {
+                    Ok(Some(ts)) => {
+                        let username =
+                            extract_username(&ts.teams.raw).unwrap_or_else(|_| "unknown".into());
+                        serde_json::json!({
+                            "profile": p,
+                            "username": username,
+                            "expired": ts.teams.is_expired(),
+                        })
+                    }
+                    _ => serde_json::json!({
+                        "profile": p,
+                        "username": null,
+                        "expired": null,
+                    }),
+                })
+                .collect();
+
+            output::print_output(format, display, 0);
             Ok(())
         }
     }
