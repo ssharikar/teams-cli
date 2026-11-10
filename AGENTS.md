@@ -25,7 +25,7 @@ src/
   config.rs         -- TOML config at ~/.config/teams-cli/config.toml. Sentinel-based defaults.
   cli/              -- clap command definitions and handlers
     mod.rs          -- Cli struct, Commands enum, global flags (--no-auto-login, --no-color, etc.)
-    auth.rs         -- login (webview), status, list, logout, token
+    auth.rs         -- login (webview), status, list, logout, token, refresh (silent, no webview)
     user.rs         -- me, get, search
     team.rs         -- list, get
     channel.rs      -- list, get, pinned
@@ -39,9 +39,15 @@ src/
     tenant.rs       -- list, domains
     config_cmd.rs   -- init, show, set, path
   auth/
-    mod.rs          -- Token resolution: env vars > file store
-    token.rs        -- TokenSet, TokenInfo, JWT decode, constants (incl. OUTLOOK_RESOURCE)
-    webview.rs      -- tao/wry webview for 4-token OAuth2 implicit flow (returns Result<TokenSet>)
+    mod.rs          -- Token resolution: env vars > file store; get_or_login/ensure_outlook_token
+                       try a silent refresh (auth::refresh) before failing
+    token.rs        -- TokenSet (incl. refresh_token), TokenInfo, JWT decode, constants
+    webview.rs      -- tao/wry webview for 4-token OAuth2 hybrid flow (token+code on the Skype
+                       leg, so a refresh token is exchanged via auth::refresh once login
+                       completes); returns Result<TokenSet>
+    refresh.rs      -- Blocking calls to the AAD v1.0 token endpoint: one-time code->refresh_token
+                       exchange, and grant_type=refresh_token redemption per resource (the same
+                       refresh token works across Skype/ChatSvcAgg/Outlook/teams id_token)
     keyring.rs      -- File-based token storage at ~/.config/teams-cli/tokens/<profile>.json (0600/0700)
   api/
     mod.rs          -- HttpClient with retry/backoff, percent-encoded URL params, domain-validated authz

@@ -63,14 +63,16 @@ fn main() {
         }
     }
 
-    // Auto-login via webview: if a non-auth command needs tokens and they're
-    // missing or expired, run webview login on the main thread before tokio starts.
-    // Silent on success; errors go to stderr.
+    // Keep tokens usable without necessarily popping a browser: if a
+    // non-auth command's tokens are missing or expired, try a silent
+    // refresh first (see auth::refresh — redeems the stored refresh token
+    // against Azure AD, no UI involved). That's safe even for unattended
+    // cron jobs run with --no-auto-login, so it always runs; only the
+    // interactive webview fallback below respects that flag.
     if !matches!(
         cli.command,
         Commands::Auth(_) | Commands::Config(_) | Commands::Completions { .. }
-    ) && !cli.no_auto_login
-    {
+    ) {
         let cfg = config::Config::load().ok();
         let profile = if cli.profile == "default" {
             cfg.as_ref()
@@ -80,31 +82,57 @@ fn main() {
             &cli.profile
         };
         let is_outlook_cmd = matches!(cli.command, Commands::Mail(_) | Commands::Calendar(_));
-        let needs_login = match auth::resolve_tokens(profile) {
+
+        // `Some(existing)` means tokens are stale and need attention;
+        // `existing` itself is `None` when there's nothing stored at all
+        // (vs. Some(ts) for a stored-but-expired set) — only the latter is
+        // worth attempting a silent refresh against.
+        let stale: Option<Option<auth::token::TokenSet>> = match auth::resolve_tokens(profile) {
             Ok(Some(ts)) => {
-                if ts.is_expired() {
-                    true
-                } else if is_outlook_cmd {
-                    ts.outlook.as_ref().is_none_or(|t| t.is_expired())
-                } else {
-                    false
-                }
+                let needs = ts.is_expired()
+                    || (is_outlook_cmd && ts.outlook.as_ref().is_none_or(|t| t.is_expired()));
+                needs.then_some(Some(ts))
             }
-            Ok(None) => true,
-            Err(_) => true,
+            Ok(None) => Some(None),
+            Err(_) => Some(None),
         };
-        if needs_login {
-            let tenant = cfg
-                .as_ref()
-                .map(|c| c.profile(profile).tenant_id.clone())
-                .unwrap_or_else(|| "common".to_string());
-            match auth::webview::webview_login(&tenant, profile) {
-                Ok(token_set) => {
-                    tracing::debug!("auto-login successful for profile '{}'", token_set.profile);
+
+        if let Some(existing) = stale {
+            let refreshed = existing.as_ref().and_then(|ts| {
+                auth::refresh::refresh_token_set(ts)
+                    .inspect_err(|e| tracing::debug!("silent token refresh failed: {e}"))
+                    .ok()
+            });
+
+            match refreshed {
+                Some(fresh) => {
+                    if let Err(e) = auth::keyring::store_tokens(profile, &fresh) {
+                        tracing::debug!("failed to persist refreshed tokens: {e}");
+                    }
                 }
-                Err(e) => {
-                    eprintln!("auto-login failed: {e}");
-                    std::process::exit(e.exit_code());
+                None if !cli.no_auto_login => {
+                    let tenant = cfg
+                        .as_ref()
+                        .map(|c| c.profile(profile).tenant_id.clone())
+                        .unwrap_or_else(|| "common".to_string());
+                    match auth::webview::webview_login(&tenant, profile) {
+                        Ok(token_set) => {
+                            tracing::debug!(
+                                "auto-login successful for profile '{}'",
+                                token_set.profile
+                            );
+                        }
+                        Err(e) => {
+                            eprintln!("auto-login failed: {e}");
+                            std::process::exit(e.exit_code());
+                        }
+                    }
+                }
+                None => {
+                    // --no-auto-login and refresh failed or wasn't possible
+                    // (no tokens / no refresh token stored): leave things
+                    // as-is. run() surfaces the appropriate
+                    // TokenExpired/AuthError itself.
                 }
             }
         }

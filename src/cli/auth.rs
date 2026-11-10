@@ -35,6 +35,8 @@ pub enum AuthCommand {
     },
     /// List all profiles with stored credentials
     List,
+    /// Silently refresh tokens using the stored refresh token (no browser)
+    Refresh,
 }
 
 pub async fn handle(args: &AuthArgs, profile: &str, format: OutputFormat) -> Result<()> {
@@ -72,6 +74,7 @@ pub async fn handle(args: &AuthArgs, profile: &str, format: OutputFormat) -> Res
                             "expired": t.is_expired(),
                             "expires_at": t.expires_at.map(|e| e.to_rfc3339()),
                         })),
+                        "refreshable": ts.is_refreshable(),
                     });
                     output::print_output(format, status, 0);
                 }
@@ -140,17 +143,36 @@ pub async fn handle(args: &AuthArgs, profile: &str, format: OutputFormat) -> Res
                             "profile": p,
                             "username": username,
                             "expired": ts.teams.is_expired(),
+                            "refreshable": ts.is_refreshable(),
                         })
                     }
                     _ => serde_json::json!({
                         "profile": p,
                         "username": null,
                         "expired": null,
+                        "refreshable": null,
                     }),
                 })
                 .collect();
 
             output::print_output(format, display, 0);
+            Ok(())
+        }
+
+        AuthCommand::Refresh => {
+            let ts = auth::resolve_tokens(profile)?
+                .ok_or_else(|| crate::error::TeamsError::AuthError("not logged in".into()))?;
+
+            let fresh = auth::refresh::refresh_token_set(&ts)?;
+            auth::keyring::store_tokens(profile, &fresh)?;
+
+            let username = extract_username(&fresh.teams.raw).unwrap_or_else(|_| "unknown".into());
+            let result = serde_json::json!({
+                "status": "refreshed",
+                "profile": fresh.profile,
+                "username": username,
+            });
+            output::print_output(format, result, 0);
             Ok(())
         }
     }

@@ -150,6 +150,7 @@ mod tests {
             skype: TokenInfo::from_jwt(&jwt_skype, TokenType::AccessToken).unwrap(),
             chatsvcagg: TokenInfo::from_jwt(&jwt_agg, TokenType::AccessToken).unwrap(),
             outlook: None,
+            refresh_token: Some("test-refresh-token".to_string()),
             profile: "test-profile".to_string(),
             tenant_id: "t-123".to_string(),
         }
@@ -228,6 +229,19 @@ mod tests {
         assert_eq!(ts.skype.audience, deserialized.skype.audience);
         assert_eq!(ts.chatsvcagg.raw, deserialized.chatsvcagg.raw);
         assert_eq!(ts.chatsvcagg.audience, deserialized.chatsvcagg.audience);
+        assert_eq!(ts.refresh_token, deserialized.refresh_token);
+    }
+
+    #[test]
+    fn token_set_json_round_trip_without_refresh_token_field() {
+        // Simulates a token file saved before `refresh_token` existed.
+        let ts = make_test_token_set();
+        let mut json_val: serde_json::Value = serde_json::to_value(&ts).unwrap();
+        json_val.as_object_mut().unwrap().remove("refresh_token");
+        let json = serde_json::to_string(&json_val).unwrap();
+        let deserialized: TokenSet = serde_json::from_str(&json).unwrap();
+        assert!(deserialized.refresh_token.is_none());
+        assert!(!deserialized.is_refreshable());
     }
 
     #[test]

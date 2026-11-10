@@ -36,6 +36,9 @@ teams auth list
 teams auth token skype
 teams auth token outlook
 
+# Silently refresh tokens using the stored refresh token (no browser)
+teams auth refresh
+
 # Clear credentials
 teams auth logout
 ```
@@ -45,11 +48,29 @@ Tokens are stored as JSON files at `<config-dir>/teams-cli/tokens/<profile>.json
 platform-dependent: `~/Library/Application Support` on macOS,
 `~/.config` on Linux. Run `teams config path` to see the resolved location.
 
+### Token refresh
+
+The access tokens Microsoft issues are short-lived (around an hour). `auth
+login` also obtains a refresh token alongside them, so once an access token
+expires the CLI can silently redeem it for a fresh one — no browser window —
+instead of requiring another interactive login every hour. This runs
+automatically before any command whose tokens are stale, including under
+`--no-auto-login` (which only suppresses the *interactive* webview fallback,
+since silent refresh needs no UI and is safe for unattended cron jobs). Run
+`teams auth refresh` directly to trigger it by hand, or check
+`teams auth status` / `teams auth list` for a `refreshable` field.
+
+A refresh token can itself eventually stop working (password change, revoked
+session, or simply not having run the CLI in a long time) — when that
+happens, or for any profile that logged in before this existed, the CLI falls
+back to the interactive webview exactly as before.
+
 ### Auto-login
 
-If tokens are missing or expired, the CLI will attempt to authenticate before
-running the command (unless `--no-auto-login` is set). The CLI does not retry
-commands that fail mid-execution.
+If tokens are missing or expired and can't be silently refreshed, the CLI
+will attempt an interactive login before running the command (unless
+`--no-auto-login` is set). The CLI does not retry commands that fail
+mid-execution.
 
 ## Usage
 
