@@ -6,7 +6,9 @@ use crate::api::outlook::OutlookClient;
 use crate::api::HttpClient;
 use crate::auth::token::TokenSet;
 use crate::error::{Result, TeamsError};
-use crate::models::outlook::{DraftMessage, ItemBody, Recipient, SendMailMessage, SendMailRequest};
+use crate::models::outlook::{
+    DraftMessage, FileAttachment, ItemBody, Recipient, SendMailMessage, SendMailRequest,
+};
 use crate::output::{self, OutputFormat};
 
 #[derive(Args)]
@@ -42,6 +44,11 @@ pub enum MailCommand {
         /// Message ID
         message_id: String,
     },
+    /// Send an existing draft (e.g. one created by `mail draft`)
+    SendDraft {
+        /// Draft message ID
+        message_id: String,
+    },
     /// Send an email
     Send {
         /// Recipient email addresses (repeatable, or comma-separated)
@@ -68,6 +75,9 @@ pub enum MailCommand {
         /// Send as HTML
         #[arg(long)]
         html: bool,
+        /// Attach a file (repeatable)
+        #[arg(short = 'a', long = "attach")]
+        attach: Vec<String>,
     },
     /// Save an email to Drafts without sending it
     Draft {
@@ -96,6 +106,9 @@ pub enum MailCommand {
         /// Save as HTML
         #[arg(long)]
         html: bool,
+        /// Attach a file (repeatable)
+        #[arg(short = 'a', long = "attach")]
+        attach: Vec<String>,
     },
     /// Search emails
     Search {
@@ -212,6 +225,17 @@ pub async fn handle(
             output::print_output(format, result, start.elapsed().as_millis() as u64);
         }
 
+        MailCommand::SendDraft { message_id } => {
+            let start = Instant::now();
+            client.send_draft(message_id).await?;
+
+            let result = serde_json::json!({
+                "status": "sent",
+                "id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
         MailCommand::Send {
             to,
             cc,
@@ -221,6 +245,7 @@ pub async fn handle(
             stdin,
             file,
             html,
+            attach,
         } => {
             let content = resolve_body(body.as_deref(), *stdin, file.as_deref())?;
 
@@ -236,6 +261,7 @@ pub async fn handle(
                     to_recipients: recipients_from(to),
                     cc_recipients: recipients_from(cc),
                     bcc_recipients: recipients_from(bcc),
+                    attachments: attachments_from(attach)?,
                 },
                 save_to_sent_items: true,
             };
@@ -249,6 +275,7 @@ pub async fn handle(
                 "cc": cc,
                 "bcc": bcc,
                 "subject": subject,
+                "attachments": attach,
             });
             output::print_output(format, result, start.elapsed().as_millis() as u64);
         }
@@ -262,6 +289,7 @@ pub async fn handle(
             stdin,
             file,
             html,
+            attach,
         } => {
             if to.is_empty() && cc.is_empty() && bcc.is_empty() {
                 return Err(TeamsError::InvalidInput(
@@ -282,6 +310,7 @@ pub async fn handle(
                 to_recipients: recipients_from(to),
                 cc_recipients: recipients_from(cc),
                 bcc_recipients: recipients_from(bcc),
+                attachments: attachments_from(attach)?,
             };
 
             let start = Instant::now();
@@ -294,6 +323,7 @@ pub async fn handle(
                 "cc": cc,
                 "bcc": bcc,
                 "subject": subject,
+                "attachments": attach,
             });
             output::print_output(format, result, start.elapsed().as_millis() as u64);
         }
@@ -328,6 +358,28 @@ fn recipients_from(addrs: &[String]) -> Vec<Recipient> {
     addrs
         .iter()
         .map(|addr| Recipient::new(addr.trim()))
+        .collect()
+}
+
+/// Reads each path and base64-encodes it for Outlook's inline attachment
+/// form. Fine for typical attachment sizes; a very large file would need
+/// the separate chunked-upload session API, which isn't implemented here.
+fn attachments_from(paths: &[String]) -> Result<Vec<FileAttachment>> {
+    use base64::Engine;
+
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::read(path)
+                .map_err(|e| TeamsError::InvalidInput(format!("cannot read file {path:?}: {e}")))?;
+            let name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path)
+                .to_string();
+            let content_bytes = base64::engine::general_purpose::STANDARD.encode(bytes);
+            Ok(FileAttachment::new(name, content_bytes))
+        })
         .collect()
 }
 

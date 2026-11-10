@@ -80,6 +80,32 @@ pub struct SendMailMessage {
     pub cc_recipients: Vec<Recipient>,
     #[serde(rename = "BccRecipients", skip_serializing_if = "Vec::is_empty")]
     pub bcc_recipients: Vec<Recipient>,
+    #[serde(rename = "Attachments", skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<FileAttachment>,
+}
+
+/// A small file attached directly in the message body as base64 (Outlook
+/// REST API v2.0's inline attachment form — fine for typical attachments;
+/// very large files would need the separate chunked-upload session API,
+/// which this client does not implement).
+#[derive(Debug, Serialize)]
+pub struct FileAttachment {
+    #[serde(rename = "@odata.type")]
+    pub odata_type: String,
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "ContentBytes")]
+    pub content_bytes: String,
+}
+
+impl FileAttachment {
+    pub fn new(name: String, content_bytes: String) -> Self {
+        Self {
+            odata_type: "#Microsoft.OutlookServices.FileAttachment".to_string(),
+            name,
+            content_bytes,
+        }
+    }
 }
 
 // ── Draft mail ────────────────────────────────────────────────────
@@ -99,6 +125,8 @@ pub struct DraftMessage {
     pub cc_recipients: Vec<Recipient>,
     #[serde(rename = "BccRecipients", skip_serializing_if = "Vec::is_empty")]
     pub bcc_recipients: Vec<Recipient>,
+    #[serde(rename = "Attachments", skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<FileAttachment>,
 }
 
 // ── Calendar models ───────────────────────────────────────────────
@@ -262,6 +290,7 @@ mod tests {
                 to_recipients: vec![Recipient::new("bob@example.com")],
                 cc_recipients: vec![],
                 bcc_recipients: vec![],
+                attachments: vec![],
             },
             save_to_sent_items: true,
         };
@@ -270,6 +299,7 @@ mod tests {
         assert_eq!(json["Message"]["Body"]["Content"], "Hello");
         assert!(json["Message"].get("CcRecipients").is_none());
         assert!(json["Message"].get("BccRecipients").is_none());
+        assert!(json["Message"].get("Attachments").is_none());
         assert_eq!(json["SaveToSentItems"], true);
     }
 
@@ -284,6 +314,7 @@ mod tests {
             to_recipients: vec![Recipient::new("alice@example.com")],
             cc_recipients: vec![],
             bcc_recipients: vec![Recipient::new("bob@example.com")],
+            attachments: vec![],
         };
         let json = serde_json::to_value(&draft).unwrap();
         assert_eq!(json["Subject"], "Test");
@@ -292,6 +323,31 @@ mod tests {
             json["BccRecipients"][0]["EmailAddress"]["Address"],
             "bob@example.com"
         );
+    }
+
+    #[test]
+    fn serialize_draft_message_with_attachment() {
+        let draft = DraftMessage {
+            subject: "Test".to_string(),
+            body: ItemBody {
+                content_type: "Text".to_string(),
+                content: "see attached".to_string(),
+            },
+            to_recipients: vec![Recipient::new("alice@example.com")],
+            cc_recipients: vec![],
+            bcc_recipients: vec![],
+            attachments: vec![FileAttachment::new(
+                "report.pdf".to_string(),
+                "ZmFrZQ==".to_string(),
+            )],
+        };
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(
+            json["Attachments"][0]["@odata.type"],
+            "#Microsoft.OutlookServices.FileAttachment"
+        );
+        assert_eq!(json["Attachments"][0]["Name"], "report.pdf");
+        assert_eq!(json["Attachments"][0]["ContentBytes"], "ZmFrZQ==");
     }
 
     #[test]

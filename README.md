@@ -80,6 +80,10 @@ teams message list <conversation-id> --limit 50
 teams message send <conversation-id> --body "Hello from the CLI"
 echo "piped message" | teams message send <conversation-id> --stdin
 teams message get <conversation-id> <message-id>
+
+# Edit or delete a message you previously sent
+teams message edit <conversation-id> <message-id> --body "corrected text"
+teams message delete <conversation-id> <message-id>
 ```
 
 ### Users
@@ -105,8 +109,19 @@ teams mail read <message-id>
 # Send an email
 teams mail send --to user@example.com --subject "Hello" --body "Message body"
 teams mail send --to user@example.com --cc other@example.com --subject "FYI" --body "See attached"
+teams mail send --to user@example.com --bcc user1@example.com,user2@example.com --subject "FYI" --body "See attached"
 echo "piped body" | teams mail send --to user@example.com --subject "Test" --stdin
 teams mail send --to user@example.com --subject "HTML" --body "<h1>Rich</h1>" --html
+
+# Save an email to Drafts without sending it; --to/--cc/--bcc take a repeatable
+# flag or a comma-separated list (handles large Bcc lists, e.g. ~180 recipients)
+teams mail draft --to user@example.com --bcc a@example.com,b@example.com --subject "Draft" --body "Review before sending"
+
+# Send a draft created above, once it's ready
+teams mail send-draft <message-id>
+
+# Permanently delete a message (e.g. an unwanted draft)
+teams mail delete <message-id>
 
 # Search emails
 teams mail search "quarterly report" --limit 10

@@ -105,6 +105,88 @@ impl<'a> MessagesClient<'a> {
             })
     }
 
+    /// Edits the content of a message you previously sent. Uses the same
+    /// request shape as `send_message` but PUT to the existing message's own
+    /// URL instead of POST to the conversation's messages collection — the
+    /// service records this as an edit (reflected as `properties.editTime`
+    /// on later reads) rather than creating a new message.
+    pub async fn edit_message(
+        &self,
+        conversation_id: &str,
+        message_id: &str,
+        content: &str,
+        display_name: &str,
+        is_html: bool,
+        mentions_json: Option<&str>,
+    ) -> Result<()> {
+        let encoded_id = urlencoding::encode(conversation_id);
+        let url = format!(
+            "{}/v1/users/ME/conversations/{}/messages/{}",
+            self.chat_service_url, encoded_id, message_id,
+        );
+        let auth = self.auth_header();
+
+        let (messagetype, contenttype) = if is_html {
+            ("RichText/Html", "Text")
+        } else {
+            ("Text", "text")
+        };
+        let body = SendMessageRequest {
+            content: content.to_string(),
+            messagetype: messagetype.to_string(),
+            contenttype: contenttype.to_string(),
+            clientmessageid: chrono::Utc::now().timestamp_millis().to_string(),
+            imdisplayname: display_name.to_string(),
+            properties: Some(SendMessageProperties {
+                importance: Some(String::new()),
+                subject: None,
+                mentions: mentions_json.map(|s| s.to_string()),
+            }),
+            amsreferences: None,
+        };
+
+        self.http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .put(&url)
+                    .header("Authentication", &auth)
+                    .json(&body)
+            })
+            .await?;
+
+        Ok(())
+    }
+
+    /// Deletes a message you previously sent by setting its `deletetime`
+    /// property — the same properties-PUT mechanism `react`/`unreact` use
+    /// for `emotions`, just a different property name.
+    pub async fn delete_message(&self, conversation_id: &str, message_id: &str) -> Result<()> {
+        let encoded_id = urlencoding::encode(conversation_id);
+        let url = format!(
+            "{}/v1/users/ME/conversations/{}/messages/{}/properties?name=deletetime",
+            self.chat_service_url, encoded_id, message_id,
+        );
+        let auth = self.auth_header();
+
+        let timestamp = chrono::Utc::now().timestamp_millis().to_string();
+        let body = serde_json::json!({
+            "deletetime": timestamp,
+        });
+
+        self.http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .put(&url)
+                    .header("Authentication", &auth)
+                    .json(&body)
+            })
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn react(
         &self,
         conversation_id: &str,

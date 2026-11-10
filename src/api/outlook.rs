@@ -122,6 +122,22 @@ impl<'a> OutlookClient<'a> {
         })
     }
 
+    /// Sends an existing draft (e.g. one created by `create_draft`) via
+    /// POST /me/messages/{id}/send. This is the only way this client ever
+    /// delivers a message that was saved as a draft — `create_draft` itself
+    /// never sends anything.
+    pub async fn send_draft(&self, message_id: &str) -> Result<()> {
+        let encoded_id = urlencoding::encode(message_id);
+        let url = format!("{}/messages/{}/send", OUTLOOK_API_BASE, encoded_id);
+
+        let bearer = self.bearer.clone();
+        self.http
+            .execute_with_retry(|| self.http.client.post(&url).header("Authorization", &bearer))
+            .await?;
+
+        Ok(())
+    }
+
     /// Permanently deletes a message (e.g. a draft) by id.
     pub async fn delete_message(&self, message_id: &str) -> Result<()> {
         let encoded_id = urlencoding::encode(message_id);

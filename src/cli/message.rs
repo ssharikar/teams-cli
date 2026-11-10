@@ -49,6 +49,29 @@ pub enum MessageCommand {
         /// Message ID
         message_id: String,
     },
+    /// Edit a message you previously sent
+    Edit {
+        /// Conversation ID (channel or chat thread ID)
+        conversation_id: String,
+        /// Message ID to edit
+        message_id: String,
+        /// New message body text
+        #[arg(long)]
+        body: Option<String>,
+        /// Read new body from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// New body is HTML (auto-detected if content contains <at> mention tags)
+        #[arg(long)]
+        html: bool,
+    },
+    /// Delete a message you previously sent
+    Delete {
+        /// Conversation ID (channel or chat thread ID)
+        conversation_id: String,
+        /// Message ID to delete
+        message_id: String,
+    },
     /// React to a message
     React {
         /// Conversation ID (channel or chat thread ID)
@@ -192,6 +215,70 @@ pub async fn handle(
                     crate::error::TeamsError::NotFound(format!("message {message_id}"))
                 })?;
             output::print_output(format, message, start.elapsed().as_millis() as u64);
+        }
+        MessageCommand::Edit {
+            conversation_id,
+            message_id,
+            body,
+            stdin,
+            html,
+        } => {
+            let content = if *stdin {
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .map_err(|e| crate::error::TeamsError::InvalidInput(format!("stdin: {e}")))?;
+                buf.trim_end().to_string()
+            } else {
+                body.clone().ok_or_else(|| {
+                    crate::error::TeamsError::InvalidInput("provide --body or --stdin".into())
+                })?
+            };
+
+            let is_html = *html || content.contains("<at ");
+            let (final_content, mentions_json) = if is_html {
+                parse_and_rewrite_mentions(&content)
+            } else {
+                (content, None)
+            };
+
+            let display_name = crate::auth::token::extract_username(&ctx.tokens.teams.raw)
+                .unwrap_or_else(|_| "Unknown".into());
+
+            let start = Instant::now();
+            msg_client
+                .edit_message(
+                    conversation_id,
+                    message_id,
+                    &final_content,
+                    &display_name,
+                    is_html,
+                    mentions_json.as_deref(),
+                )
+                .await?;
+
+            let result = serde_json::json!({
+                "status": "edited",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+        MessageCommand::Delete {
+            conversation_id,
+            message_id,
+        } => {
+            let start = Instant::now();
+            msg_client
+                .delete_message(conversation_id, message_id)
+                .await?;
+
+            let result = serde_json::json!({
+                "status": "deleted",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
         }
         MessageCommand::React {
             conversation_id,

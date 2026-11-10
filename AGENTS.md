@@ -30,8 +30,8 @@ src/
     team.rs         -- list, get
     channel.rs      -- list, get, pinned
     chat.rs         -- list (--all for hidden), get
-    message.rs      -- list, send (--body or --stdin), get
-    mail.rs         -- list, read, send, search (Outlook email)
+    message.rs      -- list, send (--body or --stdin), get, edit, delete, react, unreact
+    mail.rs         -- list, read, send, draft, send-draft, delete, search (Outlook email)
     calendar.rs     -- list, get, create (Outlook calendar)
     tenant.rs       -- list, domains
     config_cmd.rs   -- init, show, set, path
