@@ -67,21 +67,6 @@ use super::token::{
 };
 use crate::error::TeamsError;
 
-/// Derives a stable per-profile identifier for a persistent WKWebsiteDataStore
-/// (macOS/iOS only - see `WebViewBuilderExtDarwin::with_data_store_identifier`
-/// in `webview_login`). Same profile -> same identifier -> the SSO
-/// session/cookies survive across `auth login` runs; a different profile
-/// gets a different identifier, so separate accounts still can't bleed into
-/// each other's session.
-#[cfg(target_os = "macos")]
-fn profile_data_store_id(profile: &str) -> [u8; 16] {
-    use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(format!("teams-cli-webview-profile:{profile}").as_bytes());
-    let mut id = [0u8; 16];
-    id.copy_from_slice(&digest[..16]);
-    id
-}
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum AuthPhase {
     Teams,
@@ -260,30 +245,13 @@ pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Resul
     let state_for_nav = state.clone();
     let proxy_for_nav = proxy.clone();
 
-    let webview_builder = WebViewBuilder::new().with_url(&initial_url);
-
-    // macOS: use a persistent, per-profile WKWebsiteDataStore instead of
-    // incognito mode. The SAME --profile keeps its SSO session/cookies
-    // across `auth login` runs (so the password/MFA prompt isn't repeated
-    // every time), while a different --profile gets a different
-    // identifier and therefore a fully separate session - preserving the
-    // original cross-profile isolation that incognito mode provided, minus
-    // the side effect of throwing away the session after every login.
-    // Requires macOS >= 14; `with_incognito` is unavailable here because it
-    // unconditionally forces a non-persistent data store, overriding this.
-    #[cfg(target_os = "macos")]
-    let webview_builder = {
-        use wry::WebViewBuilderExtDarwin;
-        webview_builder.with_data_store_identifier(profile_data_store_id(&profile))
-    };
-
-    // Other platforms: wry has no persistent-data-store API for these
-    // backends, so keep the previous ephemeral-session behavior (no
-    // cross-profile bleed, but no session persistence either).
-    #[cfg(not(target_os = "macos"))]
-    let webview_builder = webview_builder.with_incognito(true);
-
-    let webview = webview_builder
+    let webview = WebViewBuilder::new()
+        .with_url(&initial_url)
+        // Belt-and-suspenders alongside prompt=select_account above: an
+        // ephemeral, non-persistent session for this login window means no
+        // SSO cookie from a previous `auth login` (possibly a different
+        // --profile/account) can be reused, by construction.
+        .with_incognito(true)
         .with_navigation_handler(move |url: String| {
             if !url.starts_with("https://teams.microsoft.com/go") {
                 if !is_allowed_domain(&url) {
