@@ -65,16 +65,14 @@ fn main() {
         }
     }
 
-    // Keep tokens usable without necessarily popping a browser: if a
-    // non-auth command's tokens are missing or expired, try a silent
-    // refresh first (see auth::refresh — redeems the stored refresh token
-    // against Azure AD, no UI involved). That's safe even for unattended
-    // cron jobs run with --no-auto-login, so it always runs; only the
-    // interactive webview fallback below respects that flag.
+    // Auto-login via webview: if a non-auth command needs tokens and they're
+    // missing or expired, run webview login on the main thread before tokio starts.
+    // Silent on success; errors go to stderr.
     if !matches!(
         cli.command,
         Commands::Auth(_) | Commands::Config(_) | Commands::Completions { .. }
-    ) {
+    ) && !cli.no_auto_login
+    {
         let cfg = config::Config::load().ok();
         let profile = if cli.profile == "default" {
             cfg.as_ref()
@@ -84,76 +82,48 @@ fn main() {
             &cli.profile
         };
         let is_outlook_cmd = matches!(cli.command, Commands::Mail(_) | Commands::Calendar(_));
-
-        // `Some(existing)` means tokens are stale and need attention;
-        // `existing` itself is `None` when there's nothing stored at all
-        // (vs. Some(ts) for a stored-but-expired set) — only the latter is
-        // worth attempting a silent refresh against.
-        let stale: Option<Option<auth::token::TokenSet>> = match auth::resolve_tokens(profile) {
+        let needs_login = match auth::resolve_tokens(profile) {
             Ok(Some(ts)) => {
-                let needs = ts.is_expired()
-                    || (is_outlook_cmd && ts.outlook.as_ref().is_none_or(|t| t.is_expired()));
-                needs.then_some(Some(ts))
+                if ts.is_expired() {
+                    true
+                } else if is_outlook_cmd {
+                    ts.outlook.as_ref().is_none_or(|t| t.is_expired())
+                } else {
+                    false
+                }
             }
-            Ok(None) => Some(None),
-            Err(_) => Some(None),
+            Ok(None) => true,
+            Err(_) => true,
         };
-
-        if let Some(existing) = stale {
-            let refreshed = existing.as_ref().and_then(|ts| {
-                auth::refresh::refresh_token_set(ts)
-                    .inspect_err(|e| tracing::debug!("silent token refresh failed: {e}"))
-                    .ok()
-            });
-
-            // The interactive webview fallback blocks until a human clicks
-            // through a sign-in page; with stdin not a tty there's nobody to
-            // do that, so it would hang indefinitely (e.g. a script, cron
-            // job, or agent invocation with no one watching the window) —
-            // skip straight to the same "leave things as-is" branch as
-            // --no-auto-login instead of launching it.
-            let can_prompt_interactively = std::io::stdin().is_terminal();
-
-            match refreshed {
-                Some(fresh) => {
-                    if let Err(e) = auth::keyring::store_tokens(profile, &fresh) {
-                        tracing::debug!("failed to persist refreshed tokens: {e}");
+        if needs_login {
+            // The interactive webview blocks until a human clicks through a
+            // sign-in page; with stdin not a tty there's nobody to do that,
+            // so it would hang indefinitely (e.g. a script, cron job, or
+            // agent invocation with no one watching the window) — skip it
+            // and fail fast instead.
+            if std::io::stdin().is_terminal() {
+                let tenant = cfg
+                    .as_ref()
+                    .map(|c| c.profile(profile).tenant_id.clone())
+                    .unwrap_or_else(|| "common".to_string());
+                match auth::webview::webview_login(&tenant, profile) {
+                    Ok(token_set) => {
+                        tracing::debug!(
+                            "auto-login successful for profile '{}'",
+                            token_set.profile
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("auto-login failed: {e}");
+                        std::process::exit(e.exit_code());
                     }
                 }
-                None if !cli.no_auto_login && can_prompt_interactively => {
-                    eprintln!("tokens expired or missing; opening browser for sign-in...");
-                    let tenant = cfg
-                        .as_ref()
-                        .map(|c| c.profile(profile).tenant_id.clone())
-                        .unwrap_or_else(|| "common".to_string());
-                    match auth::webview::webview_login(&tenant, profile) {
-                        Ok(token_set) => {
-                            tracing::debug!(
-                                "auto-login successful for profile '{}'",
-                                token_set.profile
-                            );
-                        }
-                        Err(e) => {
-                            eprintln!("auto-login failed: {e}");
-                            std::process::exit(e.exit_code());
-                        }
-                    }
-                }
-                None if !cli.no_auto_login => {
-                    // Not a tty: don't launch a webview nobody can complete.
-                    // run() surfaces the appropriate TokenExpired/AuthError.
-                    eprintln!(
-                        "tokens expired or missing and stdin isn't a terminal, so the \
-                         interactive login can't run here; run 'teams auth login' from \
-                         an interactive terminal first"
-                    );
-                }
-                None => {
-                    // --no-auto-login and refresh failed or wasn't possible
-                    // (no tokens / no refresh token stored): leave things
-                    // as-is. run() surfaces the appropriate
-                    // TokenExpired/AuthError itself.
-                }
+            } else {
+                eprintln!(
+                    "tokens expired or missing and stdin isn't a terminal, so the \
+                     interactive login can't run here; run 'teams auth login' from \
+                     an interactive terminal first"
+                );
             }
         }
     }

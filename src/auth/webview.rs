@@ -60,7 +60,6 @@ mod macos_menu {
     }
 }
 
-use super::refresh;
 use super::token::{
     extract_tenant_id, TokenInfo, TokenSet, TokenType, CHATSVCAGG_RESOURCE, MICROSOFT_TENANT_ID,
     OUTLOOK_RESOURCE, REDIRECT_URI, SKYPE_RESOURCE, TEAMS_APP_ID,
@@ -82,11 +81,6 @@ struct AuthState {
     skype_token: Option<String>,
     chatsvcagg_token: Option<String>,
     outlook_token: Option<String>,
-    /// One-time authorization code from the Skype leg's hybrid response,
-    /// exchanged for a refresh token once the flow completes (see
-    /// `auth::refresh`). `None` if that exchange fails — login still
-    /// succeeds, just without silent-refresh capability for this session.
-    auth_code: Option<String>,
     tenant_id: String,
     redirect_count: u32,
     expected_state: Option<String>,
@@ -133,22 +127,12 @@ fn build_auth_url(
     (url, state)
 }
 
-struct FragmentTokens {
-    token: String,
-    is_id_token: bool,
-    state: Option<String>,
-    /// Authorization code, present only on a hybrid (`token code` /
-    /// `id_token code`) response.
-    code: Option<String>,
-}
-
-fn extract_token_from_fragment(url_str: &str) -> Option<FragmentTokens> {
+fn extract_token_from_fragment(url_str: &str) -> Option<(String, bool, Option<String>)> {
     let fragment = url_str.split('#').nth(1)?;
     let params = url::form_urlencoded::parse(fragment.as_bytes());
     let mut token = None;
     let mut is_id_token = false;
     let mut state_param = None;
-    let mut code = None;
 
     for (key, value) in params {
         match key.as_ref() {
@@ -164,19 +148,11 @@ fn extract_token_from_fragment(url_str: &str) -> Option<FragmentTokens> {
             "state" => {
                 state_param = Some(value.to_string());
             }
-            "code" => {
-                code = Some(value.to_string());
-            }
             _ => {}
         }
     }
 
-    token.map(|t| FragmentTokens {
-        token: t,
-        is_id_token,
-        state: state_param,
-        code,
-    })
+    token.map(|t| (t, is_id_token, state_param))
 }
 
 fn is_allowed_domain(url: &str) -> bool {
@@ -219,7 +195,6 @@ pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Resul
         skype_token: None,
         chatsvcagg_token: None,
         outlook_token: None,
-        auth_code: None,
         tenant_id: initial_tenant.to_string(),
         redirect_count: 0,
         expected_state: Some(initial_state),
@@ -269,15 +244,10 @@ pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Resul
                 return false;
             }
 
-            let Some(frag) = extract_token_from_fragment(&url) else {
+            let Some((token, is_id_token, returned_state)) = extract_token_from_fragment(&url)
+            else {
                 return false;
             };
-            let FragmentTokens {
-                token,
-                is_id_token,
-                state: returned_state,
-                code,
-            } = frag;
 
             if let Some(ref expected) = auth.expected_state {
                 match returned_state {
@@ -305,15 +275,9 @@ pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Resul
                         }
                         auth.teams_token = Some(token);
                         auth.phase = AuthPhase::Skype;
-                        // Hybrid response ("token code"): same implicit
-                        // access token as before, plus a one-time
-                        // authorization code exchanged after login
-                        // completes for a refresh token (see auth::refresh)
-                        // — so later commands don't need another browser
-                        // round trip once this one expires.
                         let (next_url, next_state) = build_auth_url(
                             &auth.tenant_id,
-                            "token%20code",
+                            "token",
                             Some(SKYPE_RESOURCE),
                             TEAMS_APP_ID,
                             None,
@@ -324,7 +288,6 @@ pub fn webview_login(initial_tenant: &str, profile: &str) -> crate::error::Resul
                 }
                 AuthPhase::Skype => {
                     auth.skype_token = Some(token);
-                    auth.auth_code = code;
                     auth.phase = AuthPhase::ChatSvcAgg;
                     let (next_url, next_state) = build_auth_url(
                         &auth.tenant_id,
@@ -443,25 +406,11 @@ fn build_token_set(auth: &AuthState, profile: &str) -> crate::error::Result<Toke
         .map(|raw| TokenInfo::from_jwt(raw, TokenType::AccessToken))
         .transpose()?;
 
-    // Best-effort: exchange the Skype leg's authorization code for a
-    // refresh token so later commands can silently refresh instead of
-    // needing another interactive login. If this fails for any reason
-    // (network hiccup, endpoint quirk), login still succeeds without it —
-    // the user just falls back to re-running `auth login` once tokens
-    // expire, same as before this existed.
-    let refresh_token = auth.auth_code.as_deref().and_then(|code| {
-        refresh::exchange_code_for_refresh_token(&auth.tenant_id, code, SKYPE_RESOURCE)
-            .inspect_err(|e| tracing::warn!("failed to obtain refresh token: {e}"))
-            .ok()
-            .flatten()
-    });
-
     Ok(TokenSet {
         teams: TokenInfo::from_jwt(teams_raw, TokenType::IdToken)?,
         skype: TokenInfo::from_jwt(skype_raw, TokenType::AccessToken)?,
         chatsvcagg: TokenInfo::from_jwt(chatsvcagg_raw, TokenType::AccessToken)?,
         outlook,
-        refresh_token,
         profile: profile.to_string(),
         tenant_id: auth.tenant_id.clone(),
     })

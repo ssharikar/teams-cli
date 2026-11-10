@@ -25,7 +25,7 @@ src/
   config.rs         -- TOML config at ~/.config/teams-cli/config.toml. Sentinel-based defaults.
   cli/              -- clap command definitions and handlers
     mod.rs          -- Cli struct, Commands enum, global flags (--no-auto-login, --no-color, etc.)
-    auth.rs         -- login (webview), status, list, logout, token, refresh (silent, no webview)
+    auth.rs         -- login (webview), status, list, logout, token
     user.rs         -- me, get, search
     team.rs         -- list, get
     channel.rs      -- list, get, pinned
@@ -39,19 +39,9 @@ src/
     tenant.rs       -- list, domains
     config_cmd.rs   -- init, show, set, path
   auth/
-    mod.rs          -- Token resolution: env vars > file store; get_or_login/ensure_outlook_token
-                       try a silent refresh (auth::refresh) before failing
-    token.rs        -- TokenSet (incl. refresh_token), TokenInfo, JWT decode, constants
-    webview.rs      -- tao/wry webview for 4-token OAuth2 hybrid flow (token+code on the Skype
-                       leg, so a refresh token is exchanged via auth::refresh once login
-                       completes); returns Result<TokenSet>. Runs in incognito mode - each
-                       login is a fresh, non-persistent session (a persistent per-profile
-                       WKWebsiteDataStore was tried and reverted: it caused the AAD sign-in
-                       page to hang indefinitely on macOS, so --no-auto-login + auth::refresh
-                       is the supported way to avoid repeated interactive logins)
-    refresh.rs      -- Blocking calls to the AAD v1.0 token endpoint: one-time code->refresh_token
-                       exchange, and grant_type=refresh_token redemption per resource (the same
-                       refresh token works across Skype/ChatSvcAgg/Outlook/teams id_token)
+    mod.rs          -- Token resolution: env vars > file store
+    token.rs        -- TokenSet, TokenInfo, JWT decode, constants (incl. OUTLOOK_RESOURCE)
+    webview.rs      -- tao/wry webview for 4-token OAuth2 implicit flow (returns Result<TokenSet>)
     keyring.rs      -- File-based token storage at ~/.config/teams-cli/tokens/<profile>.json (0600/0700)
   api/
     mod.rs          -- HttpClient with retry/backoff, percent-encoded URL params, domain-validated authz
@@ -89,14 +79,13 @@ src/
    correct regional base URLs. Authz URLs are validated against Microsoft/Skype
    domains.
 
-3. **Auto-login**: If tokens are missing or expired, the CLI first tries a
-   silent refresh (`auth::refresh`); if that fails, it attempts webview
-   authentication before running the command, unless `--no-auto-login` is
-   set OR stdin isn't a terminal (`std::io::IsTerminal`) - a non-interactive
-   invocation has nobody to complete the sign-in window, so it fails fast
-   instead of hanging on an unattended webview. For mail/calendar commands,
-   the Outlook token is also checked.
-   The CLI does not retry commands that fail mid-execution.
+3. **Auto-login**: If tokens are missing or expired, the CLI attempts
+   webview authentication before running the command, unless
+   `--no-auto-login` is set OR stdin isn't a terminal
+   (`std::io::IsTerminal`) - a non-interactive invocation has nobody to
+   complete the sign-in window, so it fails fast instead of hanging on an
+   unattended webview. For mail/calendar commands, the Outlook token is
+   also checked. The CLI does not retry commands that fail mid-execution.
 
 5. **Token usage by service**:
    - CSA: `Authorization: Bearer {chatsvcagg_token}` (OAuth token)
