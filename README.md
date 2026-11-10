@@ -77,6 +77,12 @@ will attempt an interactive login before running the command (unless
 `--no-auto-login` is set). The CLI does not retry commands that fail
 mid-execution.
 
+This interactive fallback only runs when stdin is a terminal. In a
+non-interactive context (a script, cron job, or any invocation with stdin
+redirected/piped) there's nobody to click through the sign-in window, so
+rather than opening one and hanging forever waiting for it, the CLI fails
+immediately with a clear error — same as passing `--no-auto-login`.
+
 ## Usage
 
 ### Teams

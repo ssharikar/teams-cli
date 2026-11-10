@@ -88,9 +88,13 @@ src/
    correct regional base URLs. Authz URLs are validated against Microsoft/Skype
    domains.
 
-3. **Auto-login**: If tokens are missing or expired, the CLI attempts
-   webview authentication before running the command (unless `--no-auto-login`
-   is set). For mail/calendar commands, the Outlook token is also checked.
+3. **Auto-login**: If tokens are missing or expired, the CLI first tries a
+   silent refresh (`auth::refresh`); if that fails, it attempts webview
+   authentication before running the command, unless `--no-auto-login` is
+   set OR stdin isn't a terminal (`std::io::IsTerminal`) - a non-interactive
+   invocation has nobody to complete the sign-in window, so it fails fast
+   instead of hanging on an unattended webview. For mail/calendar commands,
+   the Outlook token is also checked.
    The CLI does not retry commands that fail mid-execution.
 
 5. **Token usage by service**:

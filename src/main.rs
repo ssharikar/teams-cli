@@ -7,6 +7,8 @@ mod html;
 mod models;
 mod output;
 
+use std::io::IsTerminal;
+
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
@@ -104,13 +106,22 @@ fn main() {
                     .ok()
             });
 
+            // The interactive webview fallback blocks until a human clicks
+            // through a sign-in page; with stdin not a tty there's nobody to
+            // do that, so it would hang indefinitely (e.g. a script, cron
+            // job, or agent invocation with no one watching the window) —
+            // skip straight to the same "leave things as-is" branch as
+            // --no-auto-login instead of launching it.
+            let can_prompt_interactively = std::io::stdin().is_terminal();
+
             match refreshed {
                 Some(fresh) => {
                     if let Err(e) = auth::keyring::store_tokens(profile, &fresh) {
                         tracing::debug!("failed to persist refreshed tokens: {e}");
                     }
                 }
-                None if !cli.no_auto_login => {
+                None if !cli.no_auto_login && can_prompt_interactively => {
+                    eprintln!("tokens expired or missing; opening browser for sign-in...");
                     let tenant = cfg
                         .as_ref()
                         .map(|c| c.profile(profile).tenant_id.clone())
@@ -127,6 +138,15 @@ fn main() {
                             std::process::exit(e.exit_code());
                         }
                     }
+                }
+                None if !cli.no_auto_login => {
+                    // Not a tty: don't launch a webview nobody can complete.
+                    // run() surfaces the appropriate TokenExpired/AuthError.
+                    eprintln!(
+                        "tokens expired or missing and stdin isn't a terminal, so the \
+                         interactive login can't run here; run 'teams auth login' from \
+                         an interactive terminal first"
+                    );
                 }
                 None => {
                     // --no-auto-login and refresh failed or wasn't possible
