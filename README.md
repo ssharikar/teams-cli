@@ -126,6 +126,12 @@ teams mail send-draft <message-id>
 # Permanently delete a message (e.g. an unwanted draft)
 teams mail delete <message-id>
 
+# Reply (keeps subject/thread) or reply-all; forward to new recipients.
+# All three send immediately, same as `send`.
+teams mail reply <message-id> --body "Sounds good, thanks!"
+teams mail reply <message-id> --body "Looping in the team" --all
+teams mail forward <message-id> --to someone@example.com --body "FYI, see below"
+
 # Search emails
 teams mail search "quarterly report" --limit 10
 ```
@@ -145,6 +151,18 @@ teams calendar get <event-id>
 teams calendar create --subject "Standup" --start 2026-04-28T09:00:00 --end 2026-04-28T09:30:00
 teams calendar create --subject "Review" --start 2026-04-28T14:00:00 --end 2026-04-28T15:00:00 \
   --attendees alice@example.com --attendees bob@example.com --online --location "Room 1"
+
+# Update an event (only the flags you pass are changed)
+teams calendar update <event-id> --location "Room 2"
+teams calendar update <event-id> --start 2026-04-28T15:00:00 --end 2026-04-28T15:30:00
+
+# Cancel an event you organize (notifies attendees)
+teams calendar cancel <event-id> --comment "Moving to next week"
+
+# Respond to an invite you received
+teams calendar respond <event-id> --response accept
+teams calendar respond <event-id> --response decline --comment "Conflict, sorry"
+teams calendar respond <event-id> --response tentative
 ```
 
 Outlook commands use lazy token acquisition. The first time you run a mail or
