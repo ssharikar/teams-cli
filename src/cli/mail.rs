@@ -6,7 +6,7 @@ use crate::api::outlook::OutlookClient;
 use crate::api::HttpClient;
 use crate::auth::token::TokenSet;
 use crate::error::{Result, TeamsError};
-use crate::models::outlook::{ItemBody, Recipient, SendMailMessage, SendMailRequest};
+use crate::models::outlook::{DraftMessage, ItemBody, Recipient, SendMailMessage, SendMailRequest};
 use crate::output::{self, OutputFormat};
 
 #[derive(Args)]
@@ -37,14 +37,22 @@ pub enum MailCommand {
         /// Message ID
         message_id: String,
     },
+    /// Permanently delete a message (e.g. a draft)
+    Delete {
+        /// Message ID
+        message_id: String,
+    },
     /// Send an email
     Send {
-        /// Recipient email addresses (repeatable)
-        #[arg(long, required = true)]
+        /// Recipient email addresses (repeatable, or comma-separated)
+        #[arg(long, required = true, value_delimiter = ',')]
         to: Vec<String>,
-        /// CC recipients (repeatable)
-        #[arg(long)]
+        /// CC recipients (repeatable, or comma-separated)
+        #[arg(long, value_delimiter = ',')]
         cc: Vec<String>,
+        /// BCC recipients (repeatable, or comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        bcc: Vec<String>,
         /// Subject line
         #[arg(long, required = true)]
         subject: String,
@@ -58,6 +66,34 @@ pub enum MailCommand {
         #[arg(long)]
         file: Option<String>,
         /// Send as HTML
+        #[arg(long)]
+        html: bool,
+    },
+    /// Save an email to Drafts without sending it
+    Draft {
+        /// Recipient email addresses (repeatable, or comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        to: Vec<String>,
+        /// CC recipients (repeatable, or comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        cc: Vec<String>,
+        /// BCC recipients (repeatable, or comma-separated) — handles large
+        /// lists (tested with ~180 recipients in one draft)
+        #[arg(long, value_delimiter = ',')]
+        bcc: Vec<String>,
+        /// Subject line
+        #[arg(long, required = true)]
+        subject: String,
+        /// Message body text
+        #[arg(long)]
+        body: Option<String>,
+        /// Read body from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Read body from file
+        #[arg(long)]
+        file: Option<String>,
+        /// Save as HTML
         #[arg(long)]
         html: bool,
     },
@@ -147,6 +183,7 @@ pub async fn handle(
             let from = msg.from.as_ref().map(|r| r.display()).unwrap_or_default();
             let to: Vec<String> = msg.to_recipients.iter().map(|r| r.display()).collect();
             let cc: Vec<String> = msg.cc_recipients.iter().map(|r| r.display()).collect();
+            let bcc: Vec<String> = msg.bcc_recipients.iter().map(|r| r.display()).collect();
 
             let display = serde_json::json!({
                 "id": msg.id,
@@ -154,6 +191,7 @@ pub async fn handle(
                 "from": from,
                 "to": to,
                 "cc": cc,
+                "bcc": bcc,
                 "date": msg.received_date_time,
                 "body": body_text,
                 "read": msg.is_read,
@@ -163,9 +201,21 @@ pub async fn handle(
             output::print_output(format, display, start.elapsed().as_millis() as u64);
         }
 
+        MailCommand::Delete { message_id } => {
+            let start = Instant::now();
+            client.delete_message(message_id).await?;
+
+            let result = serde_json::json!({
+                "status": "deleted",
+                "id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
         MailCommand::Send {
             to,
             cc,
+            bcc,
             subject,
             body,
             stdin,
@@ -176,11 +226,6 @@ pub async fn handle(
 
             let content_type = if *html { "HTML" } else { "Text" };
 
-            let to_recipients: Vec<Recipient> =
-                to.iter().map(|addr| Recipient::new(addr)).collect();
-            let cc_recipients: Vec<Recipient> =
-                cc.iter().map(|addr| Recipient::new(addr)).collect();
-
             let request = SendMailRequest {
                 message: SendMailMessage {
                     subject: subject.clone(),
@@ -188,8 +233,9 @@ pub async fn handle(
                         content_type: content_type.to_string(),
                         content,
                     },
-                    to_recipients,
-                    cc_recipients,
+                    to_recipients: recipients_from(to),
+                    cc_recipients: recipients_from(cc),
+                    bcc_recipients: recipients_from(bcc),
                 },
                 save_to_sent_items: true,
             };
@@ -200,6 +246,53 @@ pub async fn handle(
             let result = serde_json::json!({
                 "status": "sent",
                 "to": to,
+                "cc": cc,
+                "bcc": bcc,
+                "subject": subject,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::Draft {
+            to,
+            cc,
+            bcc,
+            subject,
+            body,
+            stdin,
+            file,
+            html,
+        } => {
+            if to.is_empty() && cc.is_empty() && bcc.is_empty() {
+                return Err(TeamsError::InvalidInput(
+                    "provide at least one of --to, --cc, --bcc".into(),
+                ));
+            }
+
+            let content = resolve_body(body.as_deref(), *stdin, file.as_deref())?;
+
+            let content_type = if *html { "HTML" } else { "Text" };
+
+            let draft = DraftMessage {
+                subject: subject.clone(),
+                body: ItemBody {
+                    content_type: content_type.to_string(),
+                    content,
+                },
+                to_recipients: recipients_from(to),
+                cc_recipients: recipients_from(cc),
+                bcc_recipients: recipients_from(bcc),
+            };
+
+            let start = Instant::now();
+            let created = client.create_draft(&draft).await?;
+
+            let result = serde_json::json!({
+                "status": "draft",
+                "id": created.id,
+                "to": to,
+                "cc": cc,
+                "bcc": bcc,
                 "subject": subject,
             });
             output::print_output(format, result, start.elapsed().as_millis() as u64);
@@ -229,6 +322,13 @@ pub async fn handle(
     }
 
     Ok(())
+}
+
+fn recipients_from(addrs: &[String]) -> Vec<Recipient> {
+    addrs
+        .iter()
+        .map(|addr| Recipient::new(addr.trim()))
+        .collect()
 }
 
 fn resolve_body(body: Option<&str>, stdin: bool, file: Option<&str>) -> Result<String> {

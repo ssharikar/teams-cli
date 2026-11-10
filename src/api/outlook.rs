@@ -1,7 +1,7 @@
 use crate::error::{Result, TeamsError};
 use crate::models::outlook::{
-    CreateEventRequest, EventListResponse, MessageListResponse, OutlookEvent, OutlookMessage,
-    SendMailRequest,
+    CreateEventRequest, DraftMessage, EventListResponse, MessageListResponse, OutlookEvent,
+    OutlookMessage, SendMailRequest,
 };
 
 use super::HttpClient;
@@ -28,7 +28,7 @@ impl<'a> OutlookClient<'a> {
     ) -> Result<Vec<OutlookMessage>> {
         let encoded_folder = urlencoding::encode(folder);
         let mut url = format!(
-            "{}/mailfolders/{}/messages?$top={}&$orderby=ReceivedDateTime%20desc&$select=Id,Subject,From,ToRecipients,CcRecipients,ReceivedDateTime,BodyPreview,IsRead,HasAttachments",
+            "{}/mailfolders/{}/messages?$top={}&$orderby=ReceivedDateTime%20desc&$select=Id,Subject,From,ToRecipients,CcRecipients,BccRecipients,ReceivedDateTime,BodyPreview,IsRead,HasAttachments",
             OUTLOOK_API_BASE, encoded_folder, top,
         );
 
@@ -53,7 +53,7 @@ impl<'a> OutlookClient<'a> {
     pub async fn get_message(&self, message_id: &str) -> Result<OutlookMessage> {
         let encoded_id = urlencoding::encode(message_id);
         let url = format!(
-            "{}/messages/{}?$select=Id,Subject,From,ToRecipients,CcRecipients,ReceivedDateTime,Body,BodyPreview,IsRead,HasAttachments",
+            "{}/messages/{}?$select=Id,Subject,From,ToRecipients,CcRecipients,BccRecipients,ReceivedDateTime,Body,BodyPreview,IsRead,HasAttachments",
             OUTLOOK_API_BASE, encoded_id,
         );
 
@@ -94,6 +94,50 @@ impl<'a> OutlookClient<'a> {
                 message: format!("send mail failed: {body}"),
             })
         }
+    }
+
+    /// Creates a message in the Drafts folder via POST /me/messages. Unlike
+    /// `send_message` (POST /me/sendmail), this never delivers anything —
+    /// Outlook only sends a message that was created this way if a separate,
+    /// explicit /messages/{id}/send call is made, which this client does not
+    /// implement.
+    pub async fn create_draft(&self, draft: &DraftMessage) -> Result<OutlookMessage> {
+        let url = format!("{}/messages", OUTLOOK_API_BASE);
+
+        let bearer = self.bearer.clone();
+        let resp = self
+            .http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .post(&url)
+                    .header("Authorization", &bearer)
+                    .json(draft)
+            })
+            .await?;
+
+        resp.json().await.map_err(|e| TeamsError::ApiError {
+            status: 0,
+            message: format!("failed to parse created draft: {e}"),
+        })
+    }
+
+    /// Permanently deletes a message (e.g. a draft) by id.
+    pub async fn delete_message(&self, message_id: &str) -> Result<()> {
+        let encoded_id = urlencoding::encode(message_id);
+        let url = format!("{}/messages/{}", OUTLOOK_API_BASE, encoded_id);
+
+        let bearer = self.bearer.clone();
+        self.http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .delete(&url)
+                    .header("Authorization", &bearer)
+            })
+            .await?;
+
+        Ok(())
     }
 
     pub async fn search_messages(&self, query: &str, top: u32) -> Result<Vec<OutlookMessage>> {

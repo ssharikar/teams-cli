@@ -14,6 +14,8 @@ pub struct OutlookMessage {
     pub to_recipients: Vec<Recipient>,
     #[serde(rename = "CcRecipients", default)]
     pub cc_recipients: Vec<Recipient>,
+    #[serde(rename = "BccRecipients", default)]
+    pub bcc_recipients: Vec<Recipient>,
     #[serde(rename = "ReceivedDateTime", default)]
     pub received_date_time: String,
     #[serde(rename = "Body", default)]
@@ -76,6 +78,27 @@ pub struct SendMailMessage {
     pub to_recipients: Vec<Recipient>,
     #[serde(rename = "CcRecipients", skip_serializing_if = "Vec::is_empty")]
     pub cc_recipients: Vec<Recipient>,
+    #[serde(rename = "BccRecipients", skip_serializing_if = "Vec::is_empty")]
+    pub bcc_recipients: Vec<Recipient>,
+}
+
+// ── Draft mail ────────────────────────────────────────────────────
+
+/// Body for POST /me/messages, which creates the message in the Drafts
+/// folder without sending it (sending is a separate, explicit step via
+/// /messages/{id}/send — this type is never used for that).
+#[derive(Debug, Serialize)]
+pub struct DraftMessage {
+    #[serde(rename = "Subject")]
+    pub subject: String,
+    #[serde(rename = "Body")]
+    pub body: ItemBody,
+    #[serde(rename = "ToRecipients", skip_serializing_if = "Vec::is_empty")]
+    pub to_recipients: Vec<Recipient>,
+    #[serde(rename = "CcRecipients", skip_serializing_if = "Vec::is_empty")]
+    pub cc_recipients: Vec<Recipient>,
+    #[serde(rename = "BccRecipients", skip_serializing_if = "Vec::is_empty")]
+    pub bcc_recipients: Vec<Recipient>,
 }
 
 // ── Calendar models ───────────────────────────────────────────────
@@ -238,6 +261,7 @@ mod tests {
                 },
                 to_recipients: vec![Recipient::new("bob@example.com")],
                 cc_recipients: vec![],
+                bcc_recipients: vec![],
             },
             save_to_sent_items: true,
         };
@@ -245,7 +269,29 @@ mod tests {
         assert_eq!(json["Message"]["Subject"], "Test");
         assert_eq!(json["Message"]["Body"]["Content"], "Hello");
         assert!(json["Message"].get("CcRecipients").is_none());
+        assert!(json["Message"].get("BccRecipients").is_none());
         assert_eq!(json["SaveToSentItems"], true);
+    }
+
+    #[test]
+    fn serialize_draft_message_with_bcc() {
+        let draft = DraftMessage {
+            subject: "Test".to_string(),
+            body: ItemBody {
+                content_type: "HTML".to_string(),
+                content: "<p>Hi</p>".to_string(),
+            },
+            to_recipients: vec![Recipient::new("alice@example.com")],
+            cc_recipients: vec![],
+            bcc_recipients: vec![Recipient::new("bob@example.com")],
+        };
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(json["Subject"], "Test");
+        assert!(json.get("CcRecipients").is_none());
+        assert_eq!(
+            json["BccRecipients"][0]["EmailAddress"]["Address"],
+            "bob@example.com"
+        );
     }
 
     #[test]
