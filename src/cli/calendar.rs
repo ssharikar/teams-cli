@@ -5,6 +5,7 @@ use crate::api::outlook::OutlookClient;
 use crate::api::HttpClient;
 use crate::auth::token::TokenSet;
 use crate::error::{Result, TeamsError};
+use crate::html::strip_html;
 use crate::models::outlook::{
     Attendee, CreateEventRequest, DateTimeTimeZone, EmailAddress, ItemBody, Location,
 };
@@ -299,20 +300,6 @@ fn parse_datetime(input: &str) -> Result<String> {
     Err(TeamsError::InvalidInput(format!(
         "could not parse date/time '{input}': expected ISO 8601, relative (+3d, +1w), or keyword (now, today, tomorrow)"
     )))
-}
-
-fn strip_html(html: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
-        }
-    }
-    result.trim().to_string()
 }
 
 #[cfg(test)]

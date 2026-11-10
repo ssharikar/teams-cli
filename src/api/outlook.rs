@@ -1,7 +1,7 @@
 use crate::error::{Result, TeamsError};
 use crate::models::outlook::{
-    CreateEventRequest, DraftMessage, EventListResponse, MessageListResponse, OutlookEvent,
-    OutlookMessage, SendMailRequest,
+    CreateEventRequest, DraftMessage, EventListResponse, MailFolderListResponse,
+    MessageListResponse, OutlookEvent, OutlookMessage, SendMailRequest,
 };
 
 use super::HttpClient;
@@ -26,7 +26,8 @@ impl<'a> OutlookClient<'a> {
         filter: Option<&str>,
         top: u32,
     ) -> Result<Vec<OutlookMessage>> {
-        let encoded_folder = urlencoding::encode(folder);
+        let folder_id = self.resolve_folder_id(folder).await?;
+        let encoded_folder = urlencoding::encode(&folder_id);
         let mut url = format!(
             "{}/mailfolders/{}/messages?$top={}&$orderby=ReceivedDateTime%20desc&$select=Id,Subject,From,ToRecipients,CcRecipients,BccRecipients,ReceivedDateTime,BodyPreview,IsRead,HasAttachments",
             OUTLOOK_API_BASE, encoded_folder, top,
@@ -48,6 +49,76 @@ impl<'a> OutlookClient<'a> {
         })?;
 
         Ok(list.value)
+    }
+
+    /// Resolves a mail folder to the ID that `/mailfolders/{id}/messages`
+    /// needs. Graph/Outlook accept a handful of well-known folder names
+    /// (Inbox, Drafts, SentItems, ...) directly in that path, but any other
+    /// folder — e.g. a custom folder like "github-access" — needs its real
+    /// folder ID first, or the API fails with `ErrorInvalidIdMalformed`.
+    /// Looks among top-level folders first, then Inbox's child folders,
+    /// since custom folders are most commonly created there.
+    async fn resolve_folder_id(&self, folder: &str) -> Result<String> {
+        const WELL_KNOWN: &[&str] = &[
+            "inbox",
+            "drafts",
+            "sentitems",
+            "deleteditems",
+            "outbox",
+            "junkemail",
+            "archive",
+            "clutter",
+            "conversationhistory",
+        ];
+        let normalized: String = folder
+            .chars()
+            .filter(|c| !c.is_whitespace())
+            .collect::<String>()
+            .to_ascii_lowercase();
+        if WELL_KNOWN.contains(&normalized.as_str()) {
+            return Ok(folder.to_string());
+        }
+
+        if let Some(id) = self
+            .find_folder_by_name(&format!("{OUTLOOK_API_BASE}/mailfolders"), folder)
+            .await?
+        {
+            return Ok(id);
+        }
+        if let Some(id) = self
+            .find_folder_by_name(
+                &format!("{OUTLOOK_API_BASE}/mailfolders/inbox/childfolders"),
+                folder,
+            )
+            .await?
+        {
+            return Ok(id);
+        }
+
+        Err(TeamsError::NotFound(format!(
+            "mail folder {folder:?} (checked top-level folders and Inbox subfolders)"
+        )))
+    }
+
+    async fn find_folder_by_name(&self, folders_url: &str, name: &str) -> Result<Option<String>> {
+        let odata_value = name.replace('\'', "''");
+        let url = format!(
+            "{folders_url}?$filter={}&$select=Id,DisplayName",
+            urlencoding::encode(&format!("DisplayName eq '{odata_value}'")),
+        );
+
+        let bearer = self.bearer.clone();
+        let resp = self
+            .http
+            .execute_with_retry(|| self.http.client.get(&url).header("Authorization", &bearer))
+            .await?;
+
+        let list: MailFolderListResponse = resp.json().await.map_err(|e| TeamsError::ApiError {
+            status: 0,
+            message: format!("failed to parse mail folder list: {e}"),
+        })?;
+
+        Ok(list.value.into_iter().next().map(|f| f.id))
     }
 
     pub async fn get_message(&self, message_id: &str) -> Result<OutlookMessage> {

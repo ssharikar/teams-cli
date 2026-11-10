@@ -58,6 +58,22 @@ pub struct MessageListResponse {
     pub next_link: Option<String>,
 }
 
+// ── Mail folders ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailFolder {
+    #[serde(rename = "Id", default)]
+    pub id: String,
+    #[serde(rename = "DisplayName", default)]
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailFolderListResponse {
+    #[serde(rename = "value", default)]
+    pub value: Vec<MailFolder>,
+}
+
 // ── Send mail ─────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]

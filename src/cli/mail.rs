@@ -6,6 +6,7 @@ use crate::api::outlook::OutlookClient;
 use crate::api::HttpClient;
 use crate::auth::token::TokenSet;
 use crate::error::{Result, TeamsError};
+use crate::html::strip_html;
 use crate::models::outlook::{
     DraftMessage, FileAttachment, ItemBody, Recipient, SendMailMessage, SendMailRequest,
 };
@@ -436,20 +437,6 @@ fn parse_since(since: &str) -> Result<chrono::DateTime<chrono::Utc>> {
     Ok(chrono::Utc::now() - duration)
 }
 
-fn strip_html(html: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
-        }
-    }
-    result.trim().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -499,15 +486,5 @@ mod tests {
     #[test]
     fn resolve_body_missing_all() {
         assert!(resolve_body(None, false, None).is_err());
-    }
-
-    #[test]
-    fn strip_html_basic() {
-        assert_eq!(strip_html("<p>hello</p>"), "hello");
-    }
-
-    #[test]
-    fn strip_html_empty() {
-        assert_eq!(strip_html(""), "");
     }
 }

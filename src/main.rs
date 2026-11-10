@@ -3,6 +3,7 @@ mod auth;
 mod cli;
 mod config;
 mod error;
+mod html;
 mod models;
 mod output;
 
