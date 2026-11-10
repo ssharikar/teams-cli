@@ -29,6 +29,9 @@ teams auth login
 # Check token status
 teams auth status
 
+# List every profile with stored credentials (e.g. multiple accounts/tenants)
+teams auth list
+
 # Export a token for scripting
 teams auth token skype
 teams auth token outlook
