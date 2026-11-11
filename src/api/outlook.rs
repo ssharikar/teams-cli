@@ -228,6 +228,26 @@ impl<'a> OutlookClient<'a> {
         Ok(())
     }
 
+    /// Sets a message's read/unread state via PATCH /me/messages/{id}.
+    pub async fn set_message_read(&self, message_id: &str, is_read: bool) -> Result<()> {
+        let encoded_id = urlencoding::encode(message_id);
+        let url = format!("{OUTLOOK_API_BASE}/messages/{encoded_id}");
+
+        let bearer = self.bearer.clone();
+        let body = serde_json::json!({ "IsRead": is_read });
+        self.http
+            .execute_with_retry(|| {
+                self.http
+                    .client
+                    .patch(&url)
+                    .header("Authorization", &bearer)
+                    .json(&body)
+            })
+            .await?;
+
+        Ok(())
+    }
+
     pub async fn search_messages(&self, query: &str, top: u32) -> Result<Vec<OutlookMessage>> {
         let encoded_query = urlencoding::encode(query);
         let url = format!(

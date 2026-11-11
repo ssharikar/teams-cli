@@ -45,6 +45,14 @@ pub enum MailCommand {
         /// Message ID
         message_id: String,
     },
+    /// Mark a message as read (or unread with --unread)
+    MarkRead {
+        /// Message ID
+        message_id: String,
+        /// Mark as unread instead of read
+        #[arg(long)]
+        unread: bool,
+    },
     /// Download a message's file attachments to disk
     Download {
         /// Message ID
@@ -266,6 +274,18 @@ pub async fn handle(
 
             let result = serde_json::json!({
                 "status": "deleted",
+                "id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::MarkRead { message_id, unread } => {
+            let start = Instant::now();
+            let is_read = !unread;
+            client.set_message_read(message_id, is_read).await?;
+
+            let result = serde_json::json!({
+                "status": if is_read { "read" } else { "unread" },
                 "id": message_id,
             });
             output::print_output(format, result, start.elapsed().as_millis() as u64);
