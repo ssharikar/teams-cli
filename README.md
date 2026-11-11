@@ -149,6 +149,10 @@ teams mail send-draft <message-id>
 # Permanently delete a message (e.g. an unwanted draft)
 teams mail delete <message-id>
 
+# Mark a message as read (or --unread to flip it back)
+teams mail mark-read <message-id>
+teams mail mark-read <message-id> --unread
+
 # Download a message's file attachments (skips inline/embedded images by
 # default; --all includes those too)
 teams mail download <message-id> --out ./downloads
