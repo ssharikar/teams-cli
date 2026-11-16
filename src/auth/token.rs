@@ -19,6 +19,15 @@ pub struct TokenSet {
     pub chatsvcagg: TokenInfo,
     #[serde(default)]
     pub outlook: Option<TokenInfo>,
+    /// AAD v1.0 refresh token, obtained via `auth::refresh::device_code_login`.
+    /// Tied to the app's client ID, not a single resource, so it can be
+    /// redeemed via `grant_type=refresh_token` for any of Skype,
+    /// ChatSvcAgg, Outlook, or the Teams id_token. `None` for tokens from
+    /// the webview implicit-grant login (which never returns one), or from
+    /// the `TEAMS_CLI_*_TOKEN` env vars — both fall back to the
+    /// interactive webview login when expired.
+    #[serde(default)]
+    pub refresh_token: Option<String>,
     pub profile: String,
     pub tenant_id: String,
 }
@@ -30,6 +39,10 @@ impl std::fmt::Debug for TokenSet {
             .field("skype", &self.skype)
             .field("chatsvcagg", &self.chatsvcagg)
             .field("outlook", &self.outlook)
+            .field(
+                "refresh_token",
+                &self.refresh_token.as_ref().map(|_| "[REDACTED]"),
+            )
             .field("profile", &self.profile)
             .field("tenant_id", &self.tenant_id)
             .finish()
@@ -89,6 +102,12 @@ impl TokenInfo {
 impl TokenSet {
     pub fn is_expired(&self) -> bool {
         self.teams.is_expired() || self.skype.is_expired() || self.chatsvcagg.is_expired()
+    }
+
+    /// Whether an expired token set can be silently refreshed (no browser
+    /// needed) rather than requiring an interactive `auth login`.
+    pub fn is_refreshable(&self) -> bool {
+        self.refresh_token.is_some()
     }
 
     pub fn skype_header(&self) -> String {
@@ -372,9 +391,37 @@ mod tests {
             skype: make_token_info(skype_exp),
             chatsvcagg: make_token_info(agg_exp),
             outlook: None,
+            refresh_token: None,
             profile: "test".to_string(),
             tenant_id: "tid-123".to_string(),
         }
+    }
+
+    // ── TokenSet::is_refreshable ────────────────────────────────────
+
+    #[test]
+    fn is_refreshable_false_without_refresh_token() {
+        let far_future = 4102444800i64;
+        let ts = make_test_token_set(far_future, far_future, far_future);
+        assert!(!ts.is_refreshable());
+    }
+
+    #[test]
+    fn is_refreshable_true_with_refresh_token() {
+        let far_future = 4102444800i64;
+        let mut ts = make_test_token_set(far_future, far_future, far_future);
+        ts.refresh_token = Some("rt-123".to_string());
+        assert!(ts.is_refreshable());
+    }
+
+    #[test]
+    fn debug_token_set_redacts_refresh_token() {
+        let far_future = 4102444800i64;
+        let mut ts = make_test_token_set(far_future, far_future, far_future);
+        ts.refresh_token = Some("super-secret-refresh-token".to_string());
+        let debug = format!("{ts:?}");
+        assert!(!debug.contains("super-secret-refresh-token"));
+        assert!(debug.contains("[REDACTED]"));
     }
 
     #[test]

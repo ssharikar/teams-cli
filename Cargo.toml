@@ -19,7 +19,11 @@ clap_complete = "4"
 tokio = { version = "1", features = ["full"] }
 
 # HTTP
-reqwest = { version = "0.12", features = ["json", "cookies"] }
+# "blocking" is used only for the OAuth token-endpoint calls in src/auth —
+# the webview login flow runs on the main thread before the tokio runtime
+# starts, and the few callers inside async code are single in-flight CLI
+# commands where blocking the one worker thread briefly is harmless.
+reqwest = { version = "0.12", features = ["json", "cookies", "blocking"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }

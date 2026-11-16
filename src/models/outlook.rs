@@ -14,6 +14,8 @@ pub struct OutlookMessage {
     pub to_recipients: Vec<Recipient>,
     #[serde(rename = "CcRecipients", default)]
     pub cc_recipients: Vec<Recipient>,
+    #[serde(rename = "BccRecipients", default)]
+    pub bcc_recipients: Vec<Recipient>,
     #[serde(rename = "ReceivedDateTime", default)]
     pub received_date_time: String,
     #[serde(rename = "Body", default)]
@@ -56,6 +58,49 @@ pub struct MessageListResponse {
     pub next_link: Option<String>,
 }
 
+// ── Mail folders ──────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailFolder {
+    #[serde(rename = "Id", default)]
+    pub id: String,
+    #[serde(rename = "DisplayName", default)]
+    pub display_name: String,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailFolderListResponse {
+    #[serde(rename = "value", default)]
+    pub value: Vec<MailFolder>,
+}
+
+// ── Attachments ───────────────────────────────────────────────────
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct MailAttachment {
+    #[serde(rename = "Id", default)]
+    pub id: String,
+    #[serde(rename = "Name", default)]
+    pub name: String,
+    #[serde(rename = "ContentType", default)]
+    pub content_type: String,
+    #[serde(rename = "Size", default)]
+    pub size: i64,
+    #[serde(rename = "IsInline", default)]
+    pub is_inline: bool,
+    /// Present on the list/get response for file attachments (base64). Not
+    /// present for other attachment kinds (e.g. ItemAttachment), which this
+    /// client doesn't download.
+    #[serde(rename = "ContentBytes", default)]
+    pub content_bytes: Option<String>,
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct AttachmentListResponse {
+    #[serde(rename = "value", default)]
+    pub value: Vec<MailAttachment>,
+}
+
 // ── Send mail ─────────────────────────────────────────────────────
 
 #[derive(Debug, Serialize)]
@@ -76,6 +121,55 @@ pub struct SendMailMessage {
     pub to_recipients: Vec<Recipient>,
     #[serde(rename = "CcRecipients", skip_serializing_if = "Vec::is_empty")]
     pub cc_recipients: Vec<Recipient>,
+    #[serde(rename = "BccRecipients", skip_serializing_if = "Vec::is_empty")]
+    pub bcc_recipients: Vec<Recipient>,
+    #[serde(rename = "Attachments", skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<FileAttachment>,
+}
+
+/// A small file attached directly in the message body as base64 (Outlook
+/// REST API v2.0's inline attachment form — fine for typical attachments;
+/// very large files would need the separate chunked-upload session API,
+/// which this client does not implement).
+#[derive(Debug, Serialize)]
+pub struct FileAttachment {
+    #[serde(rename = "@odata.type")]
+    pub odata_type: String,
+    #[serde(rename = "Name")]
+    pub name: String,
+    #[serde(rename = "ContentBytes")]
+    pub content_bytes: String,
+}
+
+impl FileAttachment {
+    pub fn new(name: String, content_bytes: String) -> Self {
+        Self {
+            odata_type: "#Microsoft.OutlookServices.FileAttachment".to_string(),
+            name,
+            content_bytes,
+        }
+    }
+}
+
+// ── Draft mail ────────────────────────────────────────────────────
+
+/// Body for POST /me/messages, which creates the message in the Drafts
+/// folder without sending it (sending is a separate, explicit step via
+/// /messages/{id}/send — this type is never used for that).
+#[derive(Debug, Serialize)]
+pub struct DraftMessage {
+    #[serde(rename = "Subject")]
+    pub subject: String,
+    #[serde(rename = "Body")]
+    pub body: ItemBody,
+    #[serde(rename = "ToRecipients", skip_serializing_if = "Vec::is_empty")]
+    pub to_recipients: Vec<Recipient>,
+    #[serde(rename = "CcRecipients", skip_serializing_if = "Vec::is_empty")]
+    pub cc_recipients: Vec<Recipient>,
+    #[serde(rename = "BccRecipients", skip_serializing_if = "Vec::is_empty")]
+    pub bcc_recipients: Vec<Recipient>,
+    #[serde(rename = "Attachments", skip_serializing_if = "Vec::is_empty")]
+    pub attachments: Vec<FileAttachment>,
 }
 
 // ── Calendar models ───────────────────────────────────────────────
@@ -158,6 +252,25 @@ pub struct CreateEventRequest {
     pub is_online_meeting: Option<bool>,
 }
 
+// ── Update event ──────────────────────────────────────────────────
+
+/// Body for PATCH /me/events/{id}. Every field is optional so only what the
+/// caller actually provided gets sent — Graph/Outlook only touches the
+/// fields present in a PATCH body, leaving everything else as-is.
+#[derive(Debug, Default, Serialize)]
+pub struct UpdateEventRequest {
+    #[serde(rename = "Subject", skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(rename = "Start", skip_serializing_if = "Option::is_none")]
+    pub start: Option<DateTimeTimeZone>,
+    #[serde(rename = "End", skip_serializing_if = "Option::is_none")]
+    pub end: Option<DateTimeTimeZone>,
+    #[serde(rename = "Location", skip_serializing_if = "Option::is_none")]
+    pub location: Option<Location>,
+    #[serde(rename = "Body", skip_serializing_if = "Option::is_none")]
+    pub body: Option<ItemBody>,
+}
+
 // ── Helpers ───────────────────────────────────────────────────────
 
 impl Recipient {
@@ -238,6 +351,8 @@ mod tests {
                 },
                 to_recipients: vec![Recipient::new("bob@example.com")],
                 cc_recipients: vec![],
+                bcc_recipients: vec![],
+                attachments: vec![],
             },
             save_to_sent_items: true,
         };
@@ -245,7 +360,56 @@ mod tests {
         assert_eq!(json["Message"]["Subject"], "Test");
         assert_eq!(json["Message"]["Body"]["Content"], "Hello");
         assert!(json["Message"].get("CcRecipients").is_none());
+        assert!(json["Message"].get("BccRecipients").is_none());
+        assert!(json["Message"].get("Attachments").is_none());
         assert_eq!(json["SaveToSentItems"], true);
+    }
+
+    #[test]
+    fn serialize_draft_message_with_bcc() {
+        let draft = DraftMessage {
+            subject: "Test".to_string(),
+            body: ItemBody {
+                content_type: "HTML".to_string(),
+                content: "<p>Hi</p>".to_string(),
+            },
+            to_recipients: vec![Recipient::new("alice@example.com")],
+            cc_recipients: vec![],
+            bcc_recipients: vec![Recipient::new("bob@example.com")],
+            attachments: vec![],
+        };
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(json["Subject"], "Test");
+        assert!(json.get("CcRecipients").is_none());
+        assert_eq!(
+            json["BccRecipients"][0]["EmailAddress"]["Address"],
+            "bob@example.com"
+        );
+    }
+
+    #[test]
+    fn serialize_draft_message_with_attachment() {
+        let draft = DraftMessage {
+            subject: "Test".to_string(),
+            body: ItemBody {
+                content_type: "Text".to_string(),
+                content: "see attached".to_string(),
+            },
+            to_recipients: vec![Recipient::new("alice@example.com")],
+            cc_recipients: vec![],
+            bcc_recipients: vec![],
+            attachments: vec![FileAttachment::new(
+                "report.pdf".to_string(),
+                "ZmFrZQ==".to_string(),
+            )],
+        };
+        let json = serde_json::to_value(&draft).unwrap();
+        assert_eq!(
+            json["Attachments"][0]["@odata.type"],
+            "#Microsoft.OutlookServices.FileAttachment"
+        );
+        assert_eq!(json["Attachments"][0]["Name"], "report.pdf");
+        assert_eq!(json["Attachments"][0]["ContentBytes"], "ZmFrZQ==");
     }
 
     #[test]
@@ -303,6 +467,20 @@ mod tests {
     }
 
     #[test]
+    fn serialize_update_event_request_only_set_fields() {
+        let req = UpdateEventRequest {
+            subject: Some("New subject".to_string()),
+            ..Default::default()
+        };
+        let json = serde_json::to_value(&req).unwrap();
+        assert_eq!(json["Subject"], "New subject");
+        assert!(json.get("Start").is_none());
+        assert!(json.get("End").is_none());
+        assert!(json.get("Location").is_none());
+        assert!(json.get("Body").is_none());
+    }
+
+    #[test]
     fn recipient_display_with_name() {
         let r = Recipient {
             email_address: EmailAddress {
@@ -328,5 +506,47 @@ mod tests {
         assert!(msg.from.is_none());
         assert!(msg.to_recipients.is_empty());
         assert!(!msg.is_read);
+    }
+
+    #[test]
+    fn deserialize_attachment_list_response() {
+        let json = r##"{
+            "value": [
+                {
+                    "@odata.type": "#Microsoft.OutlookServices.FileAttachment",
+                    "Id": "att-1",
+                    "Name": "report.pdf",
+                    "ContentType": "application/pdf",
+                    "Size": 12345,
+                    "IsInline": false,
+                    "ContentBytes": "ZmFrZQ=="
+                },
+                {
+                    "@odata.type": "#Microsoft.OutlookServices.FileAttachment",
+                    "Id": "att-2",
+                    "Name": "logo.png",
+                    "ContentType": "image/png",
+                    "Size": 500,
+                    "IsInline": true,
+                    "ContentBytes": "ZmFrZTI="
+                }
+            ]
+        }"##;
+        let resp: AttachmentListResponse = serde_json::from_str(json).unwrap();
+        assert_eq!(resp.value.len(), 2);
+        assert_eq!(resp.value[0].name, "report.pdf");
+        assert!(!resp.value[0].is_inline);
+        assert_eq!(resp.value[0].content_bytes.as_deref(), Some("ZmFrZQ=="));
+        assert!(resp.value[1].is_inline);
+    }
+
+    #[test]
+    fn deserialize_attachment_missing_content_bytes() {
+        let json = r#"{"Id": "att-3", "Name": "note.txt"}"#;
+        let att: MailAttachment = serde_json::from_str(json).unwrap();
+        assert_eq!(att.name, "note.txt");
+        assert!(att.content_bytes.is_none());
+        assert!(!att.is_inline);
+        assert_eq!(att.size, 0);
     }
 }

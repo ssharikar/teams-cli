@@ -6,7 +6,10 @@ use crate::api::outlook::OutlookClient;
 use crate::api::HttpClient;
 use crate::auth::token::TokenSet;
 use crate::error::{Result, TeamsError};
-use crate::models::outlook::{ItemBody, Recipient, SendMailMessage, SendMailRequest};
+use crate::html::strip_html;
+use crate::models::outlook::{
+    DraftMessage, FileAttachment, ItemBody, Recipient, SendMailMessage, SendMailRequest,
+};
 use crate::output::{self, OutputFormat};
 
 #[derive(Args)]
@@ -37,14 +40,80 @@ pub enum MailCommand {
         /// Message ID
         message_id: String,
     },
+    /// Permanently delete a message (e.g. a draft)
+    Delete {
+        /// Message ID
+        message_id: String,
+    },
+    /// Mark a message as read (or unread with --unread)
+    MarkRead {
+        /// Message ID
+        message_id: String,
+        /// Mark as unread instead of read
+        #[arg(long)]
+        unread: bool,
+    },
+    /// Download a message's file attachments to disk
+    Download {
+        /// Message ID
+        message_id: String,
+        /// Directory to save attachments into (default: current directory)
+        #[arg(long, short = 'o')]
+        out: Option<String>,
+        /// Also download inline attachments (e.g. images embedded in the body)
+        #[arg(long)]
+        all: bool,
+    },
+    /// Reply to a message, keeping the subject/thread (sends immediately)
+    Reply {
+        /// Message ID being replied to
+        message_id: String,
+        /// Reply body text
+        #[arg(long)]
+        body: Option<String>,
+        /// Read reply body from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Read reply body from file
+        #[arg(long)]
+        file: Option<String>,
+        /// Reply to everyone on the message (To + Cc), not just the sender
+        #[arg(long)]
+        all: bool,
+    },
+    /// Forward a message to new recipients (sends immediately)
+    Forward {
+        /// Message ID being forwarded
+        message_id: String,
+        /// Recipient email addresses (repeatable, or comma-separated)
+        #[arg(long, required = true, value_delimiter = ',')]
+        to: Vec<String>,
+        /// Comment to add above the forwarded message
+        #[arg(long)]
+        body: Option<String>,
+        /// Read comment from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Read comment from file
+        #[arg(long)]
+        file: Option<String>,
+    },
+    /// Send an existing draft (e.g. one created by `mail draft`)
+    SendDraft {
+        /// Draft message ID
+        message_id: String,
+    },
     /// Send an email
     Send {
-        /// Recipient email addresses (repeatable)
-        #[arg(long, required = true)]
+        /// Recipient email addresses (repeatable, or comma-separated)
+        #[arg(long, required = true, value_delimiter = ',')]
         to: Vec<String>,
-        /// CC recipients (repeatable)
-        #[arg(long)]
+        /// CC recipients (repeatable, or comma-separated)
+        #[arg(long, value_delimiter = ',')]
         cc: Vec<String>,
+        /// BCC recipients (repeatable, or comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        bcc: Vec<String>,
         /// Subject line
         #[arg(long, required = true)]
         subject: String,
@@ -60,6 +129,40 @@ pub enum MailCommand {
         /// Send as HTML
         #[arg(long)]
         html: bool,
+        /// Attach a file (repeatable)
+        #[arg(short = 'a', long = "attach")]
+        attach: Vec<String>,
+    },
+    /// Save an email to Drafts without sending it
+    Draft {
+        /// Recipient email addresses (repeatable, or comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        to: Vec<String>,
+        /// CC recipients (repeatable, or comma-separated)
+        #[arg(long, value_delimiter = ',')]
+        cc: Vec<String>,
+        /// BCC recipients (repeatable, or comma-separated) — handles large
+        /// lists (tested with ~180 recipients in one draft)
+        #[arg(long, value_delimiter = ',')]
+        bcc: Vec<String>,
+        /// Subject line
+        #[arg(long, required = true)]
+        subject: String,
+        /// Message body text
+        #[arg(long)]
+        body: Option<String>,
+        /// Read body from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// Read body from file
+        #[arg(long)]
+        file: Option<String>,
+        /// Save as HTML
+        #[arg(long)]
+        html: bool,
+        /// Attach a file (repeatable)
+        #[arg(short = 'a', long = "attach")]
+        attach: Vec<String>,
     },
     /// Search emails
     Search {
@@ -147,6 +250,7 @@ pub async fn handle(
             let from = msg.from.as_ref().map(|r| r.display()).unwrap_or_default();
             let to: Vec<String> = msg.to_recipients.iter().map(|r| r.display()).collect();
             let cc: Vec<String> = msg.cc_recipients.iter().map(|r| r.display()).collect();
+            let bcc: Vec<String> = msg.bcc_recipients.iter().map(|r| r.display()).collect();
 
             let display = serde_json::json!({
                 "id": msg.id,
@@ -154,6 +258,7 @@ pub async fn handle(
                 "from": from,
                 "to": to,
                 "cc": cc,
+                "bcc": bcc,
                 "date": msg.received_date_time,
                 "body": body_text,
                 "read": msg.is_read,
@@ -163,23 +268,161 @@ pub async fn handle(
             output::print_output(format, display, start.elapsed().as_millis() as u64);
         }
 
+        MailCommand::Delete { message_id } => {
+            let start = Instant::now();
+            client.delete_message(message_id).await?;
+
+            let result = serde_json::json!({
+                "status": "deleted",
+                "id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::MarkRead { message_id, unread } => {
+            let start = Instant::now();
+            let is_read = !unread;
+            client.set_message_read(message_id, is_read).await?;
+
+            let result = serde_json::json!({
+                "status": if is_read { "read" } else { "unread" },
+                "id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::Download {
+            message_id,
+            out,
+            all,
+        } => {
+            let start = Instant::now();
+            let attachments = client.list_attachments(message_id).await?;
+
+            let out_dir = out.as_deref().unwrap_or(".");
+            std::fs::create_dir_all(out_dir).map_err(|e| {
+                TeamsError::InvalidInput(format!("cannot create directory {out_dir:?}: {e}"))
+            })?;
+
+            let mut saved = Vec::new();
+            for att in &attachments {
+                if att.is_inline && !*all {
+                    continue;
+                }
+
+                let content_bytes = if let Some(bytes) = &att.content_bytes {
+                    bytes.clone()
+                } else {
+                    client
+                        .get_attachment(message_id, &att.id)
+                        .await?
+                        .content_bytes
+                        .ok_or_else(|| {
+                            TeamsError::ApiError {
+                                status: 0,
+                                message: format!(
+                                    "attachment {:?} has no downloadable content (not a file attachment?)",
+                                    att.name
+                                ),
+                            }
+                        })?
+                };
+
+                use base64::Engine;
+                let decoded = base64::engine::general_purpose::STANDARD
+                    .decode(&content_bytes)
+                    .map_err(|e| TeamsError::ApiError {
+                        status: 0,
+                        message: format!("attachment {:?}: invalid base64 content: {e}", att.name),
+                    })?;
+
+                let safe_name = sanitize_filename(&att.name);
+                let path = std::path::Path::new(out_dir).join(&safe_name);
+                std::fs::write(&path, &decoded)
+                    .map_err(|e| TeamsError::InvalidInput(format!("cannot write {path:?}: {e}")))?;
+
+                saved.push(serde_json::json!({
+                    "name": att.name,
+                    "path": path.to_string_lossy(),
+                    "size": decoded.len(),
+                }));
+            }
+
+            let result = serde_json::json!({
+                "status": "downloaded",
+                "id": message_id,
+                "count": saved.len(),
+                "files": saved,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::Reply {
+            message_id,
+            body,
+            stdin,
+            file,
+            all,
+        } => {
+            let comment = resolve_body(body.as_deref(), *stdin, file.as_deref())?;
+
+            let start = Instant::now();
+            client.reply_to_message(message_id, &comment, *all).await?;
+
+            let result = serde_json::json!({
+                "status": if *all { "replied-all" } else { "replied" },
+                "id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::Forward {
+            message_id,
+            to,
+            body,
+            stdin,
+            file,
+        } => {
+            let comment = resolve_body(body.as_deref(), *stdin, file.as_deref())?;
+
+            let start = Instant::now();
+            client
+                .forward_message(message_id, &comment, recipients_from(to))
+                .await?;
+
+            let result = serde_json::json!({
+                "status": "forwarded",
+                "id": message_id,
+                "to": to,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::SendDraft { message_id } => {
+            let start = Instant::now();
+            client.send_draft(message_id).await?;
+
+            let result = serde_json::json!({
+                "status": "sent",
+                "id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
         MailCommand::Send {
             to,
             cc,
+            bcc,
             subject,
             body,
             stdin,
             file,
             html,
+            attach,
         } => {
             let content = resolve_body(body.as_deref(), *stdin, file.as_deref())?;
 
             let content_type = if *html { "HTML" } else { "Text" };
-
-            let to_recipients: Vec<Recipient> =
-                to.iter().map(|addr| Recipient::new(addr)).collect();
-            let cc_recipients: Vec<Recipient> =
-                cc.iter().map(|addr| Recipient::new(addr)).collect();
 
             let request = SendMailRequest {
                 message: SendMailMessage {
@@ -188,8 +431,10 @@ pub async fn handle(
                         content_type: content_type.to_string(),
                         content,
                     },
-                    to_recipients,
-                    cc_recipients,
+                    to_recipients: recipients_from(to),
+                    cc_recipients: recipients_from(cc),
+                    bcc_recipients: recipients_from(bcc),
+                    attachments: attachments_from(attach)?,
                 },
                 save_to_sent_items: true,
             };
@@ -200,7 +445,58 @@ pub async fn handle(
             let result = serde_json::json!({
                 "status": "sent",
                 "to": to,
+                "cc": cc,
+                "bcc": bcc,
                 "subject": subject,
+                "attachments": attach,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+
+        MailCommand::Draft {
+            to,
+            cc,
+            bcc,
+            subject,
+            body,
+            stdin,
+            file,
+            html,
+            attach,
+        } => {
+            if to.is_empty() && cc.is_empty() && bcc.is_empty() {
+                return Err(TeamsError::InvalidInput(
+                    "provide at least one of --to, --cc, --bcc".into(),
+                ));
+            }
+
+            let content = resolve_body(body.as_deref(), *stdin, file.as_deref())?;
+
+            let content_type = if *html { "HTML" } else { "Text" };
+
+            let draft = DraftMessage {
+                subject: subject.clone(),
+                body: ItemBody {
+                    content_type: content_type.to_string(),
+                    content,
+                },
+                to_recipients: recipients_from(to),
+                cc_recipients: recipients_from(cc),
+                bcc_recipients: recipients_from(bcc),
+                attachments: attachments_from(attach)?,
+            };
+
+            let start = Instant::now();
+            let created = client.create_draft(&draft).await?;
+
+            let result = serde_json::json!({
+                "status": "draft",
+                "id": created.id,
+                "to": to,
+                "cc": cc,
+                "bcc": bcc,
+                "subject": subject,
+                "attachments": attach,
             });
             output::print_output(format, result, start.elapsed().as_millis() as u64);
         }
@@ -229,6 +525,51 @@ pub async fn handle(
     }
 
     Ok(())
+}
+
+fn recipients_from(addrs: &[String]) -> Vec<Recipient> {
+    addrs
+        .iter()
+        .map(|addr| Recipient::new(addr.trim()))
+        .collect()
+}
+
+/// Reads each path and base64-encodes it for Outlook's inline attachment
+/// form. Fine for typical attachment sizes; a very large file would need
+/// the separate chunked-upload session API, which isn't implemented here.
+fn attachments_from(paths: &[String]) -> Result<Vec<FileAttachment>> {
+    use base64::Engine;
+
+    paths
+        .iter()
+        .map(|path| {
+            let bytes = std::fs::read(path)
+                .map_err(|e| TeamsError::InvalidInput(format!("cannot read file {path:?}: {e}")))?;
+            let name = std::path::Path::new(path)
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or(path)
+                .to_string();
+            let content_bytes = base64::engine::general_purpose::STANDARD.encode(bytes);
+            Ok(FileAttachment::new(name, content_bytes))
+        })
+        .collect()
+}
+
+/// Strips path separators and leading dots from an attachment name before
+/// using it as a filename, so a malicious/odd `Name` field (e.g.
+/// "../../etc/passwd") can't escape the chosen output directory.
+fn sanitize_filename(name: &str) -> String {
+    let base = name
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(name)
+        .trim_start_matches('.');
+    if base.is_empty() {
+        "attachment".to_string()
+    } else {
+        base.to_string()
+    }
 }
 
 fn resolve_body(body: Option<&str>, stdin: bool, file: Option<&str>) -> Result<String> {
@@ -284,20 +625,6 @@ fn parse_since(since: &str) -> Result<chrono::DateTime<chrono::Utc>> {
     Ok(chrono::Utc::now() - duration)
 }
 
-fn strip_html(html: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
-        }
-    }
-    result.trim().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -350,12 +677,31 @@ mod tests {
     }
 
     #[test]
-    fn strip_html_basic() {
-        assert_eq!(strip_html("<p>hello</p>"), "hello");
+    fn sanitize_filename_plain_name() {
+        assert_eq!(sanitize_filename("report.pdf"), "report.pdf");
     }
 
     #[test]
-    fn strip_html_empty() {
-        assert_eq!(strip_html(""), "");
+    fn sanitize_filename_strips_directory_traversal() {
+        assert_eq!(sanitize_filename("../../etc/passwd"), "passwd");
+    }
+
+    #[test]
+    fn sanitize_filename_strips_windows_path() {
+        assert_eq!(
+            sanitize_filename("C:\\Users\\bob\\report.pdf"),
+            "report.pdf"
+        );
+    }
+
+    #[test]
+    fn sanitize_filename_strips_leading_dot() {
+        assert_eq!(sanitize_filename(".hidden"), "hidden");
+    }
+
+    #[test]
+    fn sanitize_filename_empty_falls_back() {
+        assert_eq!(sanitize_filename(""), "attachment");
+        assert_eq!(sanitize_filename("."), "attachment");
     }
 }

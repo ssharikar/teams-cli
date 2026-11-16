@@ -29,6 +29,9 @@ teams auth login
 # Check token status
 teams auth status
 
+# List every profile with stored credentials (e.g. multiple accounts/tenants)
+teams auth list
+
 # Export a token for scripting
 teams auth token skype
 teams auth token outlook
@@ -47,6 +50,12 @@ platform-dependent: `~/Library/Application Support` on macOS,
 If tokens are missing or expired, the CLI will attempt to authenticate before
 running the command (unless `--no-auto-login` is set). The CLI does not retry
 commands that fail mid-execution.
+
+This interactive fallback only runs when stdin is a terminal. In a
+non-interactive context (a script, cron job, or any invocation with stdin
+redirected/piped) there's nobody to click through the sign-in window, so
+rather than opening one and hanging forever waiting for it, the CLI fails
+immediately with a clear error — same as passing `--no-auto-login`.
 
 ## Usage
 
@@ -80,7 +89,28 @@ teams message list <conversation-id> --limit 50
 teams message send <conversation-id> --body "Hello from the CLI"
 echo "piped message" | teams message send <conversation-id> --stdin
 teams message get <conversation-id> <message-id>
+
+# Edit or delete a message you previously sent
+teams message edit <conversation-id> <message-id> --body "corrected text"
+teams message delete <conversation-id> <message-id>
 ```
+
+Every `message` subcommand also accepts a friendly target instead of a raw
+conversation ID, resolved against your teams/channels and chats (same data
+as `teams channel list` / `teams chat list`):
+
+```sh
+# "#name" looks up a channel by display name across all your teams
+teams message send "#general" --body "Deploying now"
+
+# Anything else looks up a chat by title, or a 1:1 chat by participant name
+teams message send "Project Rollout" --body "Status update"
+teams message send "Alice Smith" --body "Hey, got a sec?"
+```
+
+If a name matches more than one channel or chat, the command errors out
+listing the ambiguous matches instead of guessing — use a more specific
+name or fall back to the raw ID from `channel list`/`chat list`.
 
 ### Users
 
@@ -105,8 +135,34 @@ teams mail read <message-id>
 # Send an email
 teams mail send --to user@example.com --subject "Hello" --body "Message body"
 teams mail send --to user@example.com --cc other@example.com --subject "FYI" --body "See attached"
+teams mail send --to user@example.com --bcc user1@example.com,user2@example.com --subject "FYI" --body "See attached"
 echo "piped body" | teams mail send --to user@example.com --subject "Test" --stdin
 teams mail send --to user@example.com --subject "HTML" --body "<h1>Rich</h1>" --html
+
+# Save an email to Drafts without sending it; --to/--cc/--bcc take a repeatable
+# flag or a comma-separated list (handles large Bcc lists, e.g. ~180 recipients)
+teams mail draft --to user@example.com --bcc a@example.com,b@example.com --subject "Draft" --body "Review before sending"
+
+# Send a draft created above, once it's ready
+teams mail send-draft <message-id>
+
+# Permanently delete a message (e.g. an unwanted draft)
+teams mail delete <message-id>
+
+# Mark a message as read (or --unread to flip it back)
+teams mail mark-read <message-id>
+teams mail mark-read <message-id> --unread
+
+# Download a message's file attachments (skips inline/embedded images by
+# default; --all includes those too)
+teams mail download <message-id> --out ./downloads
+teams mail download <message-id> --all
+
+# Reply (keeps subject/thread) or reply-all; forward to new recipients.
+# All three send immediately, same as `send`.
+teams mail reply <message-id> --body "Sounds good, thanks!"
+teams mail reply <message-id> --body "Looping in the team" --all
+teams mail forward <message-id> --to someone@example.com --body "FYI, see below"
 
 # Search emails
 teams mail search "quarterly report" --limit 10
@@ -127,6 +183,18 @@ teams calendar get <event-id>
 teams calendar create --subject "Standup" --start 2026-04-28T09:00:00 --end 2026-04-28T09:30:00
 teams calendar create --subject "Review" --start 2026-04-28T14:00:00 --end 2026-04-28T15:00:00 \
   --attendees alice@example.com --attendees bob@example.com --online --location "Room 1"
+
+# Update an event (only the flags you pass are changed)
+teams calendar update <event-id> --location "Room 2"
+teams calendar update <event-id> --start 2026-04-28T15:00:00 --end 2026-04-28T15:30:00
+
+# Cancel an event you organize (notifies attendees)
+teams calendar cancel <event-id> --comment "Moving to next week"
+
+# Respond to an invite you received
+teams calendar respond <event-id> --response accept
+teams calendar respond <event-id> --response decline --comment "Conflict, sorry"
+teams calendar respond <event-id> --response tentative
 ```
 
 Outlook commands use lazy token acquisition. The first time you run a mail or

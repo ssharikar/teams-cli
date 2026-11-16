@@ -25,14 +25,17 @@ src/
   config.rs         -- TOML config at ~/.config/teams-cli/config.toml. Sentinel-based defaults.
   cli/              -- clap command definitions and handlers
     mod.rs          -- Cli struct, Commands enum, global flags (--no-auto-login, --no-color, etc.)
-    auth.rs         -- login (webview), status, logout, token
+    auth.rs         -- login (webview), status, list, logout, token
     user.rs         -- me, get, search
     team.rs         -- list, get
     channel.rs      -- list, get, pinned
-    chat.rs         -- list (--all for hidden), get
-    message.rs      -- list, send (--body or --stdin), get
-    mail.rs         -- list, read, send, search (Outlook email)
-    calendar.rs     -- list, get, create (Outlook calendar)
+    chat.rs         -- list (--all for hidden), get, create
+    message.rs      -- list, send (--body or --stdin), get, edit, delete, react, unreact;
+                       conversation_id also accepts "#channel-name" or a chat
+                       title/participant name, resolved via CSA conversations
+    mail.rs         -- list, read, send, draft, send-draft, delete, download,
+                       reply, forward, search (Outlook email)
+    calendar.rs     -- list, get, create, update, cancel, respond (Outlook calendar)
     tenant.rs       -- list, domains
     config_cmd.rs   -- init, show, set, path
   auth/
@@ -77,9 +80,12 @@ src/
    domains.
 
 3. **Auto-login**: If tokens are missing or expired, the CLI attempts
-   webview authentication before running the command (unless `--no-auto-login`
-   is set). For mail/calendar commands, the Outlook token is also checked.
-   The CLI does not retry commands that fail mid-execution.
+   webview authentication before running the command, unless
+   `--no-auto-login` is set OR stdin isn't a terminal
+   (`std::io::IsTerminal`) - a non-interactive invocation has nobody to
+   complete the sign-in window, so it fails fast instead of hanging on an
+   unattended webview. For mail/calendar commands, the Outlook token is
+   also checked. The CLI does not retry commands that fail mid-execution.
 
 5. **Token usage by service**:
    - CSA: `Authorization: Bearer {chatsvcagg_token}` (OAuth token)

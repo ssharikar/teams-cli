@@ -3,10 +3,13 @@ use std::io::Read;
 use std::time::Instant;
 
 use crate::api::blob::BlobClient;
+use crate::api::csa::CsaClient;
 use crate::api::messages::MessagesClient;
 use crate::api::HttpClient;
 use crate::auth::token::TokenSet;
-use crate::error::Result;
+use crate::error::{Result, TeamsError};
+use crate::html::strip_html;
+use crate::models::ConversationResponse;
 use crate::output::{self, OutputFormat};
 
 #[derive(Args)]
@@ -19,7 +22,8 @@ pub struct MessageArgs {
 pub enum MessageCommand {
     /// List messages in a conversation
     List {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Maximum number of messages to fetch
         #[arg(long, default_value = "50")]
@@ -27,7 +31,8 @@ pub enum MessageCommand {
     },
     /// Send a message to a conversation
     Send {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Message body text
         #[arg(long)]
@@ -44,14 +49,41 @@ pub enum MessageCommand {
     },
     /// Get a specific message
     Get {
-        /// Conversation ID
+        /// Conversation ID, or a friendly target: "#channel-name" or a chat
+        /// title / participant name
         conversation_id: String,
         /// Message ID
         message_id: String,
     },
+    /// Edit a message you previously sent
+    Edit {
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
+        conversation_id: String,
+        /// Message ID to edit
+        message_id: String,
+        /// New message body text
+        #[arg(long)]
+        body: Option<String>,
+        /// Read new body from stdin
+        #[arg(long)]
+        stdin: bool,
+        /// New body is HTML (auto-detected if content contains <at> mention tags)
+        #[arg(long)]
+        html: bool,
+    },
+    /// Delete a message you previously sent
+    Delete {
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
+        conversation_id: String,
+        /// Message ID to delete
+        message_id: String,
+    },
     /// React to a message
     React {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Message ID to react to
         message_id: String,
@@ -61,7 +93,8 @@ pub enum MessageCommand {
     },
     /// Remove a reaction from a message
     Unreact {
-        /// Conversation ID (channel or chat thread ID)
+        /// Conversation ID (channel or chat thread ID), or a friendly target:
+        /// "#channel-name" or a chat title / participant name
         conversation_id: String,
         /// Message ID to remove reaction from
         message_id: String,
@@ -86,14 +119,16 @@ pub async fn handle(
     format: OutputFormat,
 ) -> Result<()> {
     let msg_client = MessagesClient::new(ctx.http, ctx.messaging_token, ctx.chat_service_url);
+    let csa = CsaClient::new(ctx.http, ctx.tokens);
 
     match &args.command {
         MessageCommand::List {
             conversation_id,
             limit,
         } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let start = Instant::now();
-            let messages = msg_client.get_messages(conversation_id, *limit).await?;
+            let messages = msg_client.get_messages(&conversation_id, *limit).await?;
             let display: Vec<serde_json::Value> = messages
                 .iter()
                 .filter(|m| m.message_type == "RichText/Html" || m.message_type == "Text")
@@ -116,6 +151,8 @@ pub async fn handle(
             html,
             file,
         } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
+            let conversation_id = conversation_id.as_str();
             let content = if *stdin {
                 let mut buf = String::new();
                 std::io::stdin()
@@ -183,8 +220,9 @@ pub async fn handle(
             conversation_id,
             message_id,
         } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let start = Instant::now();
-            let messages = msg_client.get_messages(conversation_id, 200).await?;
+            let messages = msg_client.get_messages(&conversation_id, 200).await?;
             let message = messages
                 .iter()
                 .find(|m| m.id == *message_id)
@@ -193,15 +231,82 @@ pub async fn handle(
                 })?;
             output::print_output(format, message, start.elapsed().as_millis() as u64);
         }
+        MessageCommand::Edit {
+            conversation_id,
+            message_id,
+            body,
+            stdin,
+            html,
+        } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
+            let content = if *stdin {
+                let mut buf = String::new();
+                std::io::stdin()
+                    .read_to_string(&mut buf)
+                    .map_err(|e| crate::error::TeamsError::InvalidInput(format!("stdin: {e}")))?;
+                buf.trim_end().to_string()
+            } else {
+                body.clone().ok_or_else(|| {
+                    crate::error::TeamsError::InvalidInput("provide --body or --stdin".into())
+                })?
+            };
+
+            let is_html = *html || content.contains("<at ");
+            let (final_content, mentions_json) = if is_html {
+                parse_and_rewrite_mentions(&content)
+            } else {
+                (content, None)
+            };
+
+            let display_name = crate::auth::token::extract_username(&ctx.tokens.teams.raw)
+                .unwrap_or_else(|_| "Unknown".into());
+
+            let start = Instant::now();
+            msg_client
+                .edit_message(
+                    &conversation_id,
+                    message_id,
+                    &final_content,
+                    &display_name,
+                    is_html,
+                    mentions_json.as_deref(),
+                )
+                .await?;
+
+            let result = serde_json::json!({
+                "status": "edited",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
+        MessageCommand::Delete {
+            conversation_id,
+            message_id,
+        } => {
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
+            let start = Instant::now();
+            msg_client
+                .delete_message(&conversation_id, message_id)
+                .await?;
+
+            let result = serde_json::json!({
+                "status": "deleted",
+                "conversation_id": conversation_id,
+                "message_id": message_id,
+            });
+            output::print_output(format, result, start.elapsed().as_millis() as u64);
+        }
         MessageCommand::React {
             conversation_id,
             message_id,
             reaction,
         } => {
             validate_reaction(reaction)?;
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let start = Instant::now();
             msg_client
-                .react(conversation_id, message_id, reaction)
+                .react(&conversation_id, message_id, reaction)
                 .await?;
             let result = serde_json::json!({
                 "message_id": message_id,
@@ -216,9 +321,10 @@ pub async fn handle(
             reaction,
         } => {
             validate_reaction(reaction)?;
+            let conversation_id = resolve_target(conversation_id, &csa).await?;
             let start = Instant::now();
             msg_client
-                .unreact(conversation_id, message_id, reaction)
+                .unreact(&conversation_id, message_id, reaction)
                 .await?;
             let result = serde_json::json!({
                 "message_id": message_id,
@@ -229,6 +335,158 @@ pub async fn handle(
         }
     }
     Ok(())
+}
+
+/// Resolves a user-friendly target to the raw conversation ID the messaging
+/// API needs. Raw IDs pass straight through — channel and group/meeting
+/// thread IDs always contain "@thread.", while 1:1 chat IDs end in
+/// "@unq.gbl.spaces" — so existing scripts pay no extra round trip.
+/// Otherwise `#name` looks up a channel by display name across all teams,
+/// and anything else looks up a chat by title or participant name —
+/// mirroring `teams chat list` / `teams channel list` so a user can target
+/// what they see there without first copying out a raw ID.
+async fn resolve_target(target: &str, csa: &CsaClient<'_>) -> Result<String> {
+    if is_raw_conversation_id(target) {
+        return Ok(target.to_string());
+    }
+
+    let conversations = csa.get_conversations().await?;
+
+    if let Some(name) = target.strip_prefix('#') {
+        return resolve_channel(name, &conversations);
+    }
+
+    resolve_chat(target, &conversations)
+}
+
+/// Raw channel/group/meeting thread IDs always contain "@thread.". Raw 1:1
+/// chat IDs instead end in "@unq.gbl.spaces" (e.g.
+/// "19:<a>_<b>@unq.gbl.spaces") and don't contain "@thread." anywhere.
+fn is_raw_conversation_id(target: &str) -> bool {
+    target.contains("@thread.") || target.ends_with("@unq.gbl.spaces")
+}
+
+fn resolve_channel(name: &str, conversations: &ConversationResponse) -> Result<String> {
+    let needle = name.to_ascii_lowercase();
+    let mut exact: Vec<(String, String, String)> = Vec::new();
+    let mut partial: Vec<(String, String, String)> = Vec::new();
+
+    for team in &conversations.teams {
+        let team_name = team
+            .get("displayName")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
+        let empty = Vec::new();
+        let channels = team
+            .get("channels")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        for channel in channels {
+            let id = channel.get("id").and_then(|v| v.as_str()).unwrap_or("");
+            if id.is_empty() {
+                continue;
+            }
+            let display = channel
+                .get("displayName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            let lower = display.to_ascii_lowercase();
+            if lower == needle {
+                exact.push((team_name.to_string(), display.to_string(), id.to_string()));
+            } else if lower.contains(&needle) {
+                partial.push((team_name.to_string(), display.to_string(), id.to_string()));
+            }
+        }
+    }
+
+    let matches = if !exact.is_empty() { exact } else { partial };
+    match matches.len() {
+        0 => Err(TeamsError::NotFound(format!(
+            "channel '#{name}' (use `teams channel list <team-id>` to see channel names, or pass the raw channel ID)"
+        ))),
+        1 => Ok(matches[0].2.clone()),
+        _ => {
+            let options = matches
+                .iter()
+                .map(|(team, ch, _)| format!("{team}/#{ch}"))
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(TeamsError::InvalidInput(format!(
+                "'#{name}' matches multiple channels: {options} — use a more specific name or the raw channel ID"
+            )))
+        }
+    }
+}
+
+fn resolve_chat(target: &str, conversations: &ConversationResponse) -> Result<String> {
+    let needle = target.to_ascii_lowercase();
+    let mut exact: Vec<(String, String)> = Vec::new();
+    let mut partial: Vec<(String, String)> = Vec::new();
+
+    for chat in &conversations.chats {
+        let id = chat.get("id").and_then(|v| v.as_str()).unwrap_or("");
+        if id.is_empty() {
+            continue;
+        }
+
+        let title = chat.get("title").and_then(|v| v.as_str()).unwrap_or("");
+        let title_lower = title.to_ascii_lowercase();
+        if !title.is_empty() && title_lower == needle {
+            exact.push((title.to_string(), id.to_string()));
+            continue;
+        }
+        if !title.is_empty() && title_lower.contains(&needle) {
+            partial.push((title.to_string(), id.to_string()));
+            continue;
+        }
+
+        // No title match — fall back to participant name/email, which is
+        // the only identifying label most 1:1 chats have.
+        let empty = Vec::new();
+        let members = chat
+            .get("members")
+            .and_then(|v| v.as_array())
+            .unwrap_or(&empty);
+        for member in members {
+            let friendly = member
+                .get("friendlyName")
+                .and_then(|v| v.as_str())
+                .unwrap_or("");
+            if friendly.is_empty() {
+                continue;
+            }
+            let friendly_lower = friendly.to_ascii_lowercase();
+            if friendly_lower == needle {
+                exact.push((friendly.to_string(), id.to_string()));
+            } else if friendly_lower.contains(&needle) {
+                partial.push((friendly.to_string(), id.to_string()));
+            }
+        }
+    }
+
+    let matches = if !exact.is_empty() { exact } else { partial };
+    let mut seen = std::collections::HashSet::new();
+    let unique: Vec<_> = matches
+        .into_iter()
+        .filter(|(_, id)| seen.insert(id.clone()))
+        .collect();
+
+    match unique.len() {
+        0 => Err(TeamsError::NotFound(format!(
+            "chat/user matching '{target}' (use `teams chat list` to see chat titles, or pass the raw chat ID)"
+        ))),
+        1 => Ok(unique[0].1.clone()),
+        _ => {
+            let options = unique
+                .iter()
+                .map(|(label, _)| label.clone())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Err(TeamsError::InvalidInput(format!(
+                "'{target}' matches multiple chats: {options} — use a more specific name or the raw chat ID"
+            )))
+        }
+    }
 }
 
 const VALID_REACTIONS: &[&str] = &["like", "heart", "laugh", "surprised", "sad", "angry"];
@@ -323,20 +581,6 @@ fn parse_and_rewrite_mentions(content: &str) -> (String, Option<String>) {
     (rewritten, Some(mentions_json))
 }
 
-fn strip_html(html: &str) -> String {
-    let mut result = String::new();
-    let mut in_tag = false;
-    for ch in html.chars() {
-        match ch {
-            '<' => in_tag = true,
-            '>' => in_tag = false,
-            _ if !in_tag => result.push(ch),
-            _ => {}
-        }
-    }
-    result.trim().to_string()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -428,86 +672,125 @@ mod tests {
         assert_eq!(html_unescape("it&#39;s"), "it's");
     }
 
-    #[test]
-    fn strip_html_paragraph() {
-        assert_eq!(strip_html("<p>hello</p>"), "hello");
+    fn sample_conversations() -> ConversationResponse {
+        serde_json::from_value(serde_json::json!({
+            "teams": [
+                {
+                    "id": "team-1",
+                    "displayName": "Engineering",
+                    "channels": [
+                        {"id": "19:general@thread.tacv2", "displayName": "General"},
+                        {"id": "19:releases@thread.tacv2", "displayName": "Releases"}
+                    ]
+                },
+                {
+                    "id": "team-2",
+                    "displayName": "Design",
+                    "channels": [
+                        {"id": "19:design-general@thread.tacv2", "displayName": "General"}
+                    ]
+                }
+            ],
+            "chats": [
+                {
+                    "id": "19:chat-alice@unq.gbl.spaces",
+                    "title": "",
+                    "members": [
+                        {"mri": "8:orgid:me", "friendlyName": "Me"},
+                        {"mri": "8:orgid:alice", "friendlyName": "Alice Smith"}
+                    ]
+                },
+                {
+                    "id": "19:chat-project@thread.v2",
+                    "title": "Project Rollout",
+                    "members": []
+                }
+            ]
+        }))
+        .unwrap()
     }
 
     #[test]
-    fn strip_html_no_tags() {
-        assert_eq!(strip_html("no tags"), "no tags");
+    fn raw_id_thread_passes_through() {
+        assert!(is_raw_conversation_id("19:releases@thread.tacv2"));
+        assert!(is_raw_conversation_id(
+            "19:meeting_abc123@thread.v2"
+        ));
     }
 
     #[test]
-    fn strip_html_empty_string() {
-        assert_eq!(strip_html(""), "");
+    fn raw_id_one_on_one_chat_passes_through() {
+        // Regression test: 1:1 chat IDs (no "@thread." anywhere) were
+        // previously rejected and sent through name resolution instead.
+        assert!(is_raw_conversation_id(
+            "19:3ca9f12d-c88c-4c5d-9411-ddefdb83cefe_b46bbac7-a178-4924-af02-7961905491f3@unq.gbl.spaces"
+        ));
     }
 
     #[test]
-    fn strip_html_bold_and_italic() {
-        assert_eq!(
-            strip_html("<b>bold</b> and <i>italic</i>"),
-            "bold and italic"
-        );
+    fn raw_id_rejects_plain_name() {
+        assert!(!is_raw_conversation_id("Masood Rahimi"));
+        assert!(!is_raw_conversation_id("#general"));
     }
 
     #[test]
-    fn strip_html_nested_tags() {
-        assert_eq!(
-            strip_html("<div>nested<span>tags</span></div>"),
-            "nestedtags"
-        );
+    fn resolve_channel_exact_match() {
+        let conversations = sample_conversations();
+        let id = resolve_channel("Releases", &conversations).unwrap();
+        assert_eq!(id, "19:releases@thread.tacv2");
     }
 
     #[test]
-    fn strip_html_self_closing_tag() {
-        assert_eq!(strip_html("<br/>"), "");
+    fn resolve_channel_case_insensitive() {
+        let conversations = sample_conversations();
+        let id = resolve_channel("releases", &conversations).unwrap();
+        assert_eq!(id, "19:releases@thread.tacv2");
     }
 
     #[test]
-    fn strip_html_multiple_self_closing() {
-        assert_eq!(strip_html("a<br/>b<hr/>c"), "abc");
+    fn resolve_channel_ambiguous_exact_match_across_teams() {
+        let conversations = sample_conversations();
+        let err = resolve_channel("General", &conversations).unwrap_err();
+        assert!(err.to_string().contains("multiple channels"));
     }
 
     #[test]
-    fn strip_html_angle_brackets_in_text() {
-        // "a < b > c" - the '<' starts a "tag", ' b ' is treated as tag content,
-        // '>' ends the "tag", then ' c' is text. So we lose ' b '.
-        // The result after trim is "a  c" (with the space before '<' and after '>').
-        let result = strip_html("a < b > c");
-        assert_eq!(result, "a  c");
+    fn resolve_channel_not_found() {
+        let conversations = sample_conversations();
+        assert!(resolve_channel("nonexistent", &conversations).is_err());
     }
 
     #[test]
-    fn strip_html_unclosed_tag() {
-        // "unclosed <div tag" - '<' starts a tag, everything after is inside the tag
-        // because there's no closing '>'. So only "unclosed " is kept, trimmed to "unclosed".
-        let result = strip_html("unclosed <div tag");
-        assert_eq!(result, "unclosed");
+    fn resolve_channel_partial_match() {
+        let conversations = sample_conversations();
+        let id = resolve_channel("release", &conversations).unwrap();
+        assert_eq!(id, "19:releases@thread.tacv2");
     }
 
     #[test]
-    fn strip_html_complex_html() {
-        let html = "<html><body><h1>Title</h1><p>Some <b>bold</b> text</p></body></html>";
-        assert_eq!(strip_html(html), "TitleSome bold text");
+    fn resolve_chat_by_title() {
+        let conversations = sample_conversations();
+        let id = resolve_chat("Project Rollout", &conversations).unwrap();
+        assert_eq!(id, "19:chat-project@thread.v2");
     }
 
     #[test]
-    fn strip_html_with_attributes() {
-        assert_eq!(
-            strip_html(r#"<a href="https://example.com">link</a>"#),
-            "link"
-        );
+    fn resolve_chat_by_participant_name() {
+        let conversations = sample_conversations();
+        let id = resolve_chat("Alice Smith", &conversations).unwrap();
+        assert_eq!(id, "19:chat-alice@unq.gbl.spaces");
     }
 
     #[test]
-    fn strip_html_whitespace_only_content() {
-        // After stripping tags, only whitespace remains -> trimmed to empty
-        assert_eq!(strip_html("<p>  </p>"), "");
+    fn resolve_chat_by_partial_participant_name() {
+        let conversations = sample_conversations();
+        let id = resolve_chat("alice", &conversations).unwrap();
+        assert_eq!(id, "19:chat-alice@unq.gbl.spaces");
     }
 
     #[test]
-    fn strip_html_preserves_inner_whitespace() {
-        assert_eq!(strip_html("<p>hello   world</p>"), "hello   world");
+    fn resolve_chat_not_found() {
+        let conversations = sample_conversations();
+        assert!(resolve_chat("nobody", &conversations).is_err());
     }
 }
