@@ -12,8 +12,25 @@ use std::io::IsTerminal;
 use clap::Parser;
 use tracing_subscriber::EnvFilter;
 
+use auth::token::TokenSet;
 use cli::{Cli, Commands};
 use output::OutputFormat;
+
+// Whether auto-login should run, given the stored tokens (if any) and
+// whether the command only needs the Outlook token (mail/calendar) rather
+// than the Teams/Skype/ChatSvcAgg set.
+fn needs_login_for(ts: Option<&TokenSet>, is_outlook_cmd: bool) -> bool {
+    match ts {
+        Some(ts) => {
+            if is_outlook_cmd {
+                ts.outlook.as_ref().is_none_or(|t| t.is_expired())
+            } else {
+                ts.is_expired()
+            }
+        }
+        None => true,
+    }
+}
 
 fn main() {
     let cli = Cli::parse();
@@ -46,9 +63,16 @@ fn main() {
     };
 
     // Webview login must run on the main thread (tao/wry requirement).
-    // Handle explicit `auth login`.
+    // Handle explicit `auth login`, unless it's `--device-code`: that's a
+    // plain HTTP polling loop with no GUI involved, so it's left to run
+    // through the normal async dispatch in `run()` (cli::auth::handle)
+    // instead of being intercepted here.
     if let Commands::Auth(ref auth_args) = cli.command {
-        if let cli::auth::AuthCommand::Login { ref tenant } = auth_args.command {
+        if let cli::auth::AuthCommand::Login {
+            ref tenant,
+            device_code: false,
+        } = auth_args.command
+        {
             match auth::webview::webview_login(tenant, &cli.profile) {
                 Ok(token_set) => {
                     let username = auth::token::extract_username(&token_set.teams.raw)
@@ -65,14 +89,17 @@ fn main() {
         }
     }
 
-    // Auto-login via webview: if a non-auth command needs tokens and they're
-    // missing or expired, run webview login on the main thread before tokio starts.
-    // Silent on success; errors go to stderr.
+    // Keep tokens usable without necessarily popping a browser: if a
+    // non-auth command's tokens are missing or expired, try a silent
+    // refresh first (see auth::refresh — redeems a stored refresh token
+    // against Azure AD, no UI involved, only present after `auth login
+    // --device-code`). That's safe even for unattended agent invocations
+    // run with --no-auto-login, so it always runs; only the interactive
+    // webview fallback below respects that flag.
     if !matches!(
         cli.command,
         Commands::Auth(_) | Commands::Config(_) | Commands::Completions { .. }
-    ) && !cli.no_auto_login
-    {
+    ) {
         let cfg = config::Config::load().ok();
         let profile = if cli.profile == "default" {
             cfg.as_ref()
@@ -82,48 +109,66 @@ fn main() {
             &cli.profile
         };
         let is_outlook_cmd = matches!(cli.command, Commands::Mail(_) | Commands::Calendar(_));
-        let needs_login = match auth::resolve_tokens(profile) {
-            Ok(Some(ts)) => {
-                if ts.is_expired() {
-                    true
-                } else if is_outlook_cmd {
-                    ts.outlook.as_ref().is_none_or(|t| t.is_expired())
-                } else {
-                    false
-                }
-            }
-            Ok(None) => true,
-            Err(_) => true,
-        };
+        let existing = auth::resolve_tokens(profile).ok().flatten();
+        let needs_login = needs_login_for(existing.as_ref(), is_outlook_cmd);
+
         if needs_login {
-            // The interactive webview blocks until a human clicks through a
-            // sign-in page; with stdin not a tty there's nobody to do that,
-            // so it would hang indefinitely (e.g. a script, cron job, or
-            // agent invocation with no one watching the window) — skip it
-            // and fail fast instead.
-            if std::io::stdin().is_terminal() {
-                let tenant = cfg
-                    .as_ref()
-                    .map(|c| c.profile(profile).tenant_id.clone())
-                    .unwrap_or_else(|| "common".to_string());
-                match auth::webview::webview_login(&tenant, profile) {
-                    Ok(token_set) => {
+            let refreshed = existing.as_ref().and_then(|ts| {
+                auth::refresh::refresh_token_set(ts)
+                    .inspect_err(|e| tracing::debug!("silent token refresh failed: {e}"))
+                    .ok()
+            });
+
+            match refreshed {
+                Some(fresh) => {
+                    if let Err(e) = auth::keyring::store_tokens(profile, &fresh) {
+                        tracing::debug!("failed to persist refreshed tokens: {e}");
+                    } else {
                         tracing::debug!(
-                            "auto-login successful for profile '{}'",
-                            token_set.profile
+                            "silent refresh successful for profile '{}'",
+                            fresh.profile
                         );
                     }
-                    Err(e) => {
-                        eprintln!("auto-login failed: {e}");
-                        std::process::exit(e.exit_code());
+                }
+                None if !cli.no_auto_login => {
+                    // The interactive webview blocks until a human clicks
+                    // through a sign-in page; with stdin not a tty there's
+                    // nobody to do that, so it would hang indefinitely
+                    // (e.g. a script, cron job, or agent invocation with
+                    // no one watching the window) — skip it and fail fast
+                    // instead.
+                    if std::io::stdin().is_terminal() {
+                        let tenant = cfg
+                            .as_ref()
+                            .map(|c| c.profile(profile).tenant_id.clone())
+                            .unwrap_or_else(|| "common".to_string());
+                        match auth::webview::webview_login(&tenant, profile) {
+                            Ok(token_set) => {
+                                tracing::debug!(
+                                    "auto-login successful for profile '{}'",
+                                    token_set.profile
+                                );
+                            }
+                            Err(e) => {
+                                eprintln!("auto-login failed: {e}");
+                                std::process::exit(e.exit_code());
+                            }
+                        }
+                    } else {
+                        eprintln!(
+                            "tokens expired or missing and stdin isn't a terminal, so the \
+                             interactive login can't run here; run 'teams auth login' from \
+                             an interactive terminal first, or set up 'teams auth login \
+                             --device-code' once so future commands can refresh silently"
+                        );
                     }
                 }
-            } else {
-                eprintln!(
-                    "tokens expired or missing and stdin isn't a terminal, so the \
-                     interactive login can't run here; run 'teams auth login' from \
-                     an interactive terminal first"
-                );
+                None => {
+                    // --no-auto-login and refresh failed or wasn't
+                    // possible (no tokens / no refresh token stored):
+                    // leave things as-is. run() surfaces the appropriate
+                    // TokenExpired/AuthError itself.
+                }
             }
         }
     }
@@ -236,5 +281,87 @@ async fn run(cli: Cli, format: OutputFormat) -> error::Result<()> {
                 _ => unreachable!(),
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod needs_login_tests {
+    use super::needs_login_for;
+    use crate::auth::token::{TokenInfo, TokenSet, TokenType};
+    use chrono::{Duration, Utc};
+
+    fn token(expires_in: Duration) -> TokenInfo {
+        TokenInfo {
+            raw: "test".into(),
+            token_type: TokenType::AccessToken,
+            expires_at: Some(Utc::now() + expires_in),
+            audience: String::new(),
+        }
+    }
+
+    fn token_set(teams_expired: bool, outlook: Option<bool>) -> TokenSet {
+        let valid = Duration::hours(1);
+        let expired = Duration::hours(-1);
+        TokenSet {
+            teams: token(if teams_expired { expired } else { valid }),
+            skype: token(valid),
+            chatsvcagg: token(valid),
+            outlook: outlook.map(|outlook_expired| {
+                token(if outlook_expired { expired } else { valid })
+            }),
+            refresh_token: None,
+            profile: "default".into(),
+            tenant_id: "common".into(),
+        }
+    }
+
+    #[test]
+    fn no_tokens_needs_login() {
+        assert!(needs_login_for(None, false));
+        assert!(needs_login_for(None, true));
+    }
+
+    #[test]
+    fn outlook_cmd_ignores_expired_teams_token() {
+        // Teams token expired, Outlook token still valid: mail/calendar
+        // should NOT be gated on the Teams token (the regression this
+        // test guards against).
+        let ts = token_set(true, Some(false));
+        assert!(!needs_login_for(Some(&ts), true));
+    }
+
+    #[test]
+    fn outlook_cmd_needs_login_when_outlook_expired() {
+        let ts = token_set(false, Some(true));
+        assert!(needs_login_for(Some(&ts), true));
+    }
+
+    #[test]
+    fn outlook_cmd_needs_login_when_outlook_missing() {
+        let ts = token_set(false, None);
+        assert!(needs_login_for(Some(&ts), true));
+    }
+
+    #[test]
+    fn teams_cmd_needs_login_when_teams_expired() {
+        let ts = token_set(true, Some(false));
+        assert!(needs_login_for(Some(&ts), false));
+    }
+
+    #[test]
+    fn teams_cmd_ignores_outlook_expiry() {
+        // A non-mail/calendar command doesn't use Outlook, so an expired
+        // (or missing) Outlook token shouldn't force a login.
+        let ts = token_set(false, Some(true));
+        assert!(!needs_login_for(Some(&ts), false));
+
+        let ts_no_outlook = token_set(false, None);
+        assert!(!needs_login_for(Some(&ts_no_outlook), false));
+    }
+
+    #[test]
+    fn teams_cmd_all_valid_no_login_needed() {
+        let ts = token_set(false, Some(false));
+        assert!(!needs_login_for(Some(&ts), false));
     }
 }

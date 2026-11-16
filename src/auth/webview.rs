@@ -443,6 +443,11 @@ fn build_token_set(auth: &AuthState, profile: &str) -> crate::error::Result<Toke
         skype: TokenInfo::from_jwt(skype_raw, TokenType::AccessToken)?,
         chatsvcagg: TokenInfo::from_jwt(chatsvcagg_raw, TokenType::AccessToken)?,
         outlook,
+        // Pure OAuth2 implicit grant, by design, never returns a refresh
+        // token. Both known bootstrap alternatives (device code, hybrid
+        // implicit) are blocked at the Teams client-ID registration level
+        // — see auth::refresh's module doc.
+        refresh_token: None,
         profile: profile.to_string(),
         tenant_id: auth.tenant_id.clone(),
     })

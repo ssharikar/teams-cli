@@ -18,6 +18,13 @@ pub enum AuthCommand {
         /// Tenant ID or 'common'
         #[arg(long, default_value = "common")]
         tenant: String,
+        /// One-time device-code sign-in instead of the interactive webview.
+        /// Prints a URL and short code to complete on any browser (a
+        /// phone's, even) — no GUI session needed on this machine. Stores
+        /// a refresh token so later commands can silently re-auth with no
+        /// browser and no tty, forever (until revoked).
+        #[arg(long)]
+        device_code: bool,
     },
     /// Show current authentication status
     Status,
@@ -35,13 +42,27 @@ pub enum AuthCommand {
     },
     /// List all profiles with stored credentials
     List,
+    /// Silently refresh tokens using the stored refresh token (no browser)
+    Refresh,
 }
 
 pub async fn handle(args: &AuthArgs, profile: &str, format: OutputFormat) -> Result<()> {
     match &args.command {
-        AuthCommand::Login { .. } => {
-            // Webview login is handled on the main thread before the async
-            // runtime starts. See main.rs.
+        AuthCommand::Login {
+            tenant,
+            device_code,
+        } => {
+            if *device_code {
+                let ts = auth::refresh::device_code_login(tenant, profile)?;
+                let username =
+                    extract_username(&ts.teams.raw).unwrap_or_else(|_| "unknown".into());
+                eprintln!("Authenticated as {username}");
+                print_login_success(&ts, format);
+            }
+            // Non-device-code login is handled on the main thread before
+            // the async runtime starts (webview needs the main thread).
+            // Reaching here with device_code == false means main.rs
+            // already intercepted and returned before calling run().
             Ok(())
         }
 
@@ -72,6 +93,7 @@ pub async fn handle(args: &AuthArgs, profile: &str, format: OutputFormat) -> Res
                             "expired": t.is_expired(),
                             "expires_at": t.expires_at.map(|e| e.to_rfc3339()),
                         })),
+                        "refreshable": ts.is_refreshable(),
                     });
                     output::print_output(format, status, 0);
                 }
@@ -140,17 +162,37 @@ pub async fn handle(args: &AuthArgs, profile: &str, format: OutputFormat) -> Res
                             "profile": p,
                             "username": username,
                             "expired": ts.teams.is_expired(),
+                            "refreshable": ts.is_refreshable(),
                         })
                     }
                     _ => serde_json::json!({
                         "profile": p,
                         "username": null,
                         "expired": null,
+                        "refreshable": null,
                     }),
                 })
                 .collect();
 
             output::print_output(format, display, 0);
+            Ok(())
+        }
+
+        AuthCommand::Refresh => {
+            let ts = auth::resolve_tokens(profile)?
+                .ok_or_else(|| crate::error::TeamsError::AuthError("not logged in".into()))?;
+
+            let fresh = auth::refresh::refresh_token_set(&ts)?;
+            auth::keyring::store_tokens(profile, &fresh)?;
+
+            let username =
+                extract_username(&fresh.teams.raw).unwrap_or_else(|_| "unknown".into());
+            let result = serde_json::json!({
+                "status": "refreshed",
+                "profile": fresh.profile,
+                "username": username,
+            });
+            output::print_output(format, result, 0);
             Ok(())
         }
     }
