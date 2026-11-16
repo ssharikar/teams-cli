@@ -338,14 +338,15 @@ pub async fn handle(
 }
 
 /// Resolves a user-friendly target to the raw conversation ID the messaging
-/// API needs. Raw IDs (channel and chat thread IDs always contain
-/// "@thread.") pass straight through, so existing scripts pay no extra round
-/// trip. Otherwise `#name` looks up a channel by display name across all
-/// teams, and anything else looks up a chat by title or participant name —
+/// API needs. Raw IDs pass straight through — channel and group/meeting
+/// thread IDs always contain "@thread.", while 1:1 chat IDs end in
+/// "@unq.gbl.spaces" — so existing scripts pay no extra round trip.
+/// Otherwise `#name` looks up a channel by display name across all teams,
+/// and anything else looks up a chat by title or participant name —
 /// mirroring `teams chat list` / `teams channel list` so a user can target
 /// what they see there without first copying out a raw ID.
 async fn resolve_target(target: &str, csa: &CsaClient<'_>) -> Result<String> {
-    if target.contains("@thread.") {
+    if is_raw_conversation_id(target) {
         return Ok(target.to_string());
     }
 
@@ -356,6 +357,13 @@ async fn resolve_target(target: &str, csa: &CsaClient<'_>) -> Result<String> {
     }
 
     resolve_chat(target, &conversations)
+}
+
+/// Raw channel/group/meeting thread IDs always contain "@thread.". Raw 1:1
+/// chat IDs instead end in "@unq.gbl.spaces" (e.g.
+/// "19:<a>_<b>@unq.gbl.spaces") and don't contain "@thread." anywhere.
+fn is_raw_conversation_id(target: &str) -> bool {
+    target.contains("@thread.") || target.ends_with("@unq.gbl.spaces")
 }
 
 fn resolve_channel(name: &str, conversations: &ConversationResponse) -> Result<String> {
@@ -700,6 +708,29 @@ mod tests {
             ]
         }))
         .unwrap()
+    }
+
+    #[test]
+    fn raw_id_thread_passes_through() {
+        assert!(is_raw_conversation_id("19:releases@thread.tacv2"));
+        assert!(is_raw_conversation_id(
+            "19:meeting_abc123@thread.v2"
+        ));
+    }
+
+    #[test]
+    fn raw_id_one_on_one_chat_passes_through() {
+        // Regression test: 1:1 chat IDs (no "@thread." anywhere) were
+        // previously rejected and sent through name resolution instead.
+        assert!(is_raw_conversation_id(
+            "19:3ca9f12d-c88c-4c5d-9411-ddefdb83cefe_b46bbac7-a178-4924-af02-7961905491f3@unq.gbl.spaces"
+        ));
+    }
+
+    #[test]
+    fn raw_id_rejects_plain_name() {
+        assert!(!is_raw_conversation_id("Masood Rahimi"));
+        assert!(!is_raw_conversation_id("#general"));
     }
 
     #[test]

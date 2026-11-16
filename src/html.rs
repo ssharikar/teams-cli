@@ -51,6 +51,19 @@ pub fn strip_html(html: &str) -> String {
     collapse_blank_lines(&result).trim().to_string()
 }
 
+/// Escapes `&`/`<`/`>` and converts `\n` to `<br>`, so plain text survives
+/// being sent through an API that always renders the body as HTML regardless
+/// of intent — e.g. Outlook's reply/forward `Comment` field, which has no
+/// content-type control at all (unlike `send`/`draft`'s `ItemBody`). Without
+/// this, bare newlines collapse into one run-on paragraph and literal `<`/`>`
+/// text is silently interpreted as tags.
+pub fn plain_text_to_html(text: &str) -> String {
+    text.replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('\n', "<br>")
+}
+
 fn is_block_tag(raw_tag: &str) -> bool {
     let name = raw_tag
         .trim_start_matches('/')
@@ -187,5 +200,32 @@ mod tests {
     #[test]
     fn strip_html_paragraphs_separated_by_blank_line() {
         assert_eq!(strip_html("<p>line1</p><p>line2</p>"), "line1\n\nline2");
+    }
+
+    #[test]
+    fn plain_text_to_html_converts_newlines() {
+        assert_eq!(plain_text_to_html("line1\nline2"), "line1<br>line2");
+    }
+
+    #[test]
+    fn plain_text_to_html_escapes_angle_brackets() {
+        assert_eq!(plain_text_to_html("<org>"), "&lt;org&gt;");
+    }
+
+    #[test]
+    fn plain_text_to_html_escapes_ampersand() {
+        assert_eq!(plain_text_to_html("A & B"), "A &amp; B");
+    }
+
+    #[test]
+    fn plain_text_to_html_numbered_steps_repro() {
+        // Repro from the reported bug: a reply body with blank lines and
+        // numbered steps must keep its line breaks instead of collapsing
+        // into one paragraph.
+        let body = "Thanks,\n\n1. First step\n2. Second step\n\nRegards";
+        assert_eq!(
+            plain_text_to_html(body),
+            "Thanks,<br><br>1. First step<br>2. Second step<br><br>Regards"
+        );
     }
 }

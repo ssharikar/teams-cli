@@ -272,6 +272,11 @@ impl<'a> OutlookClient<'a> {
     /// Replies to a message via POST /me/messages/{id}/reply (or replyall),
     /// which sends immediately — Outlook builds the quoted-original body and
     /// keeps the thread/subject, prepending `comment` as the new text.
+    ///
+    /// `Comment` has no content-type control (unlike `send`/`draft`'s
+    /// `ItemBody`) and is always rendered as HTML, so `comment` is run
+    /// through `plain_text_to_html` first to keep its line breaks and avoid
+    /// literal `<`/`>` text being interpreted as tags.
     pub async fn reply_to_message(
         &self,
         message_id: &str,
@@ -283,7 +288,7 @@ impl<'a> OutlookClient<'a> {
         let url = format!("{OUTLOOK_API_BASE}/messages/{encoded_id}/{action}");
 
         let bearer = self.bearer.clone();
-        let body = serde_json::json!({ "Comment": comment });
+        let body = serde_json::json!({ "Comment": crate::html::plain_text_to_html(comment) });
         self.http
             .execute_with_retry(|| {
                 self.http
@@ -299,6 +304,9 @@ impl<'a> OutlookClient<'a> {
 
     /// Forwards a message via POST /me/messages/{id}/forward, which sends
     /// immediately to the given recipients with `comment` prepended.
+    ///
+    /// Same HTML-always caveat as `reply_to_message`: `comment` is run
+    /// through `plain_text_to_html` first.
     pub async fn forward_message(
         &self,
         message_id: &str,
@@ -309,7 +317,10 @@ impl<'a> OutlookClient<'a> {
         let url = format!("{OUTLOOK_API_BASE}/messages/{encoded_id}/forward");
 
         let bearer = self.bearer.clone();
-        let body = serde_json::json!({ "Comment": comment, "ToRecipients": to });
+        let body = serde_json::json!({
+            "Comment": crate::html::plain_text_to_html(comment),
+            "ToRecipients": to
+        });
         self.http
             .execute_with_retry(|| {
                 self.http
